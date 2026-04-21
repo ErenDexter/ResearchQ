@@ -77,7 +77,7 @@ Apply any of the 18 built-in methodologies (PRISMA shown here — or Cochrane, K
 
 ```bash
 # 1. Clone and install
-git clone https://github.com/YOUR-USERNAME/ResearchQ.git
+git clone https://github.com/ErenDexter/ResearchQ.git
 cd ResearchQ
 pnpm install
 

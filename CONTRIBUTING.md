@@ -80,7 +80,7 @@ A useful feature request explains:
 
 ```bash
 # Clone your fork
-git clone https://github.com/YOUR-USERNAME/ResearchQ.git
+git clone https://github.com/ErenDexter/ResearchQ.git
 cd ResearchQ
 
 # Install dependencies

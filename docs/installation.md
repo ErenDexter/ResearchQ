@@ -28,7 +28,7 @@ This guide walks through a fresh install of ResearchQ on macOS, Linux, and Windo
 ### 1. Clone and install
 
 ```bash
-git clone https://github.com/YOUR-USERNAME/ResearchQ.git
+git clone https://github.com/ErenDexter/ResearchQ.git
 cd ResearchQ
 pnpm install
 ```
