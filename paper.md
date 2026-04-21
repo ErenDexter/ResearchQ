@@ -17,14 +17,16 @@ authors:
     affiliation: 1
   - name: Istiaque Ahmed
     orcid: 0000-0002-3112-6568
-    affiliation: 1  # [TODO: confirm affiliation index — same institution as first author?]
+    affiliation: 2  
   - name: Souvik Mandol
     orcid: 0009-0009-0159-9899
-    affiliation: 1  # [TODO: confirm affiliation index — same institution as first author?]
+    affiliation: 1  
 affiliations:
   - name: Bangladesh University of Engineering and Technology (BUET), Dhaka, Bangladesh
     index: 1
-date: 21 April 2026  # [TODO: update on submission]
+  - name: Osaka Metropolitan University
+    index: 2
+date: 21 April 2026
 bibliography: paper.bib
 ---
 
@@ -87,6 +89,6 @@ Per the 2026 JOSS guidelines on disclosure of generative AI use, we disclose the
 
 # Acknowledgments
 
-The authors thank the maintainers of OpenAlex for providing an open, high-quality academic graph; the maintainers of SvelteKit, Drizzle, and `better-sqlite3` for the foundational open-source stack; and [TODO: grants, advisors, reviewers, institutional support].
+The authors thank the maintainers of OpenAlex for providing an open, high-quality academic graph; the maintainers of SvelteKit, Drizzle, and `better-sqlite3` for the foundational open-source stack.
 
 # References
