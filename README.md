@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Status](https://img.shields.io/badge/status-alpha-orange.svg)](#project-status)
-[![DOI](https://zenodo.org/badge/1216657015.svg)](https://doi.org/10.5281/zenodo.19675611)
+[![DOI](docs/assets/zenodo-doi.svg)](https://doi.org/10.5281/zenodo.19675611)
 
 ResearchQ turns months of manual paper screening into days of structured, reproducible, AI-assisted research. It combines the [OpenAlex](https://openalex.org/) academic graph (250M+ papers) with Google Gemini to automate the tedious parts of a systematic literature review — discovery, screening, metadata extraction, and synthesis — while keeping the researcher in full control of every decision.
 
@@ -41,15 +41,35 @@ ResearchQ is **alpha**. The core workflow (project setup → search → screenin
 
 ## Screenshots
 
-<!-- [TODO: capture screenshots of the three key views and drop into docs/img/] -->
+### Dashboard
 
-| | |
-|---|---|
-| ![Project creation](docs/img/01-project-creation.png) | ![Cross-reference matrix](docs/img/02-cross-reference.png) |
-| *Guided project creation — AI generates keywords and analysis dimensions from your domain description.* | *Cross-reference matrix — filter, sort, export to BibTeX / CSV / JSON.* |
+![Dashboard](docs/assets/dashboard.png)
 
-![Review phase stepper](docs/img/03-phase-stepper.png)
-*Methodology phase stepper — pick PRISMA (or one of 17 other frameworks) and generate every expected output from your paper data.*
+The project dashboard — at-a-glance stats for papers, relevant items, search jobs, and recent activity across the active project. The sidebar project selector lets you jump between isolated research projects; each has its own papers, keywords, and analysis framework.
+
+### Powerful, multi-strategy article search
+
+![Search strategies](docs/assets/powerful-article-search.png)
+
+Six search strategies over the [OpenAlex](https://openalex.org/) graph — topic, journal, author, publisher-scoped database search, and forward/backward citation chains. Every run shows a live progress feed (fetching → storing → AI screening → metadata extraction), and database searches are cursor-resumable so long runs survive interruptions.
+
+### Cross-reference matrix
+
+![Cross-reference matrix](docs/assets/cross-ref.png)
+
+The heart of any systematic review: every relevant paper side-by-side with title, year, authors, venue, methodology, region, platform, and population. Sort any column, filter by year range or full text, and export the whole table as CSV, BibTeX, or JSON.
+
+### Research intelligence
+
+![Research intelligence](docs/assets/research-intelligence.png)
+
+Beyond simple aggregation — prolific authors with their keyword specialties, co-authorship networks, year-over-year keyword trends, AI-generated gap analysis identifying under-researched areas, and duplicate detection for papers collected from different searches.
+
+### Guided literature review execution
+
+![Literature review phase stepper](docs/assets/literature-review.png)
+
+Apply any of the 18 built-in methodologies (PRISMA shown here — or Cochrane, Kitchenham, Arksey & O'Malley, JBI, GRADE, ENTREQ, and more). Each phase has a visible status, a note field, and one-click generation of the expected outputs: PRISMA flow diagrams, data extraction matrices, GRADE evidence tables, narrative syntheses, and 16 other deliverables — all traceable back to your paper data.
 
 ---
 
