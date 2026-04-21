@@ -1,0 +1,31 @@
+@import 'tailwindcss';
+
+/* Force light mode — dark: classes only activate with .dark ancestor (never added) */
+@custom-variant dark (&:is(.dark *));
+
+@theme {
+	--color-primary: #18181b;
+	--color-primary-foreground: #fafafa;
+	--color-muted: #f4f4f5;
+	--color-muted-foreground: #71717a;
+	--color-accent: #f4f4f5;
+	--color-accent-foreground: #18181b;
+	--color-border: #e4e4e7;
+	--color-ring: #a1a1aa;
+	--color-sidebar: #fafafa;
+	--color-sidebar-border: #e4e4e7;
+}
+
+html {
+	font-family:
+		'Inter',
+		ui-sans-serif,
+		system-ui,
+		-apple-system,
+		sans-serif;
+}
+
+body {
+	@apply bg-white text-zinc-950 antialiased;
+}
+
