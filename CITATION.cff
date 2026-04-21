@@ -1,0 +1,46 @@
+cff-version: 1.2.0
+message: "If you use ResearchQ in your research, please cite it using this metadata."
+title: "ResearchQ: AI-powered, self-hosted systematic literature review platform"
+abstract: >-
+  ResearchQ is an open-source, self-hosted platform for conducting
+  systematic literature reviews. It combines the OpenAlex academic graph
+  with large-language-model assistance for relevance screening and
+  metadata extraction, and ships with eighteen peer-reviewed review
+  methodologies (PRISMA, Cochrane, Kitchenham, JBI, GRADE, and others).
+  The tool runs locally using SQLite and Node.js, keeping all paper
+  data, prompts, and extractions on the researcher's own machine.
+type: software
+authors:
+  - family-names: "Das Prangon"
+    given-names: "Ranat"
+    email: "ranatdasprangon@gmail.com"
+    orcid: "https://orcid.org/0009-0001-5593-8384"  
+    affiliation: "Bangladesh University of Engineering and Technology (BUET)"                                 
+repository-code: "https://github.com/ErenDexter/ResearchQ"  # [TODO: update URL]
+url: "https://github.com/ErenDexter/ResearchQ"
+license: MIT
+version: "v0.1.0" 
+date-released: "2026-04-21"  
+# doi: "10.5281/zenodo.XXXXXXX"  
+keywords:
+  - systematic literature review
+  - evidence synthesis
+  - PRISMA
+  - Cochrane
+  - scoping review
+  - OpenAlex
+  - large language models
+  - LLM-assisted screening
+  - research software
+  - reproducible research
+  - SvelteKit
+  - SQLite
+preferred-citation:
+  type: article
+  title: "ResearchQ: A self-hosted, AI-assisted platform for systematic literature reviews"
+  authors:
+    - family-names: "Das Prangon"
+      given-names: "Ranat"
+  year: 2026  # [TODO: update on JOSS acceptance]
+  # journal: "Journal of Open Source Software"
+  # doi: ""  # [TODO: JOSS DOI once published]

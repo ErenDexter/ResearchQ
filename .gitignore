@@ -50,3 +50,6 @@ Thumbs.db
 # Vite timestamps
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+paper.md
+paper.bib
