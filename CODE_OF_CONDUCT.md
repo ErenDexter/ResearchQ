@@ -27,7 +27,7 @@ This Code applies in all project spaces and when an individual is representing t
 
 ## Reporting
 
-If you observe behavior that concerns you, please email **prangon.inovace@gmail.com**. Reports will be reviewed promptly and treated with discretion.
+If you observe behavior that concerns you, please email **ranatdasprangon@gmail.com**. Reports will be reviewed promptly and treated with discretion.
 
 When you report, it helps to include:
 

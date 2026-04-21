@@ -6,6 +6,7 @@
 [![Node](https://img.shields.io/badge/node-%E2%89%A520-green.svg)](https://nodejs.org/)
 [![SvelteKit](https://img.shields.io/badge/SvelteKit-2-ff3e00.svg)](https://kit.svelte.dev/)
 [![Status](https://img.shields.io/badge/status-alpha-orange.svg)](#project-status)
+[![DOI](https://zenodo.org/badge/1216657015.svg)](https://doi.org/10.5281/zenodo.19675611)
 
 ResearchQ turns months of manual paper screening into days of structured, reproducible, AI-assisted research. It combines the [OpenAlex](https://openalex.org/) academic graph (250M+ papers) with Google Gemini to automate the tedious parts of a systematic literature review — discovery, screening, metadata extraction, and synthesis — while keeping the researcher in full control of every decision.
 
@@ -195,25 +196,26 @@ All project participants are expected to follow our [Code of Conduct](CODE_OF_CO
 
 ## Citation
 
-If ResearchQ helps your research, please cite it. Machine-readable metadata is in [CITATION.cff](CITATION.cff).
+If ResearchQ helps your research, please cite it. Machine-readable metadata is in [CITATION.cff](CITATION.cff); the archived release is on Zenodo at [10.5281/zenodo.19675611](https://doi.org/10.5281/zenodo.19675611).
 
 ```bibtex
 @software{researchq_2026,
-  author  = {Das Prangon, Ranat},
+  author  = {Das Prangon, Ranat and Ahmed, Istiaque and Mandol, Souvik},
   title   = {ResearchQ: AI-powered, self-hosted systematic literature review platform},
   year    = {2026},
-  url     = {https://github.com/YOUR-USERNAME/ResearchQ},
+  url     = {https://github.com/ErenDexter/ResearchQ},
+  doi     = {10.5281/zenodo.19675611},
   license = {MIT}
 }
 ```
 
-A companion paper is in preparation for the [Journal of Open Source Software](https://joss.theoj.org/). Once published, the DOI will be added here and in `CITATION.cff`.
+A companion paper is in preparation for the [Journal of Open Source Software](https://joss.theoj.org/). Once published, the JOSS DOI will be added here and in `CITATION.cff` as the preferred citation.
 
 ---
 
 ## License
 
-[MIT](LICENSE) © 2026 Ranat Das Prangon
+[MIT](LICENSE) © 2026 Ranat Das Prangon, Istiaque Ahmed, Souvik Mandol
 
 ---
 

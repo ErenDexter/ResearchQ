@@ -14,14 +14,26 @@ authors:
   - family-names: "Das Prangon"
     given-names: "Ranat"
     email: "ranatdasprangon@gmail.com"
-    orcid: "https://orcid.org/0009-0001-5593-8384"  
-    affiliation: "Bangladesh University of Engineering and Technology (BUET)"                                 
-repository-code: "https://github.com/ErenDexter/ResearchQ"  # [TODO: update URL]
+    orcid: "https://orcid.org/0009-0001-5593-8384"
+    affiliation: "Bangladesh University of Engineering and Technology (BUET)"
+  - family-names: "Ahmed"
+    given-names: "Istiaque"
+    orcid: "https://orcid.org/0000-0002-3112-6568"
+    affiliation: "Osaka Metropolitan University"  
+  - family-names: "Mandol"
+    given-names: "Souvik"
+    orcid: "https://orcid.org/0009-0009-0159-9899"
+    affiliation: "Bangladesh University of Engineering and Technology (BUET)" 
+repository-code: "https://github.com/ErenDexter/ResearchQ"
 url: "https://github.com/ErenDexter/ResearchQ"
 license: MIT
-version: "v0.1.0" 
-date-released: "2026-04-21"  
-# doi: "10.5281/zenodo.XXXXXXX"  
+version: "v0.1.0"
+date-released: "2026-04-21"
+doi: "10.5281/zenodo.19675611"
+identifiers:
+  - type: doi
+    value: "10.5281/zenodo.19675611"
+    description: "Archived release on Zenodo"
 keywords:
   - systematic literature review
   - evidence synthesis
@@ -41,6 +53,10 @@ preferred-citation:
   authors:
     - family-names: "Das Prangon"
       given-names: "Ranat"
+    - family-names: "Ahmed"
+      given-names: "Istiaque"
+    - family-names: "Mandol"
+      given-names: "Souvik"
   year: 2026  # [TODO: update on JOSS acceptance]
   # journal: "Journal of Open Source Software"
   # doi: ""  # [TODO: JOSS DOI once published]
