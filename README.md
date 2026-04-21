@@ -3,8 +3,6 @@
 **AI-powered, self-hosted systematic literature review platform.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Node](https://img.shields.io/badge/node-%E2%89%A520-green.svg)](https://nodejs.org/)
-[![SvelteKit](https://img.shields.io/badge/SvelteKit-2-ff3e00.svg)](https://kit.svelte.dev/)
 [![Status](https://img.shields.io/badge/status-alpha-orange.svg)](#project-status)
 [![DOI](https://zenodo.org/badge/1216657015.svg)](https://doi.org/10.5281/zenodo.19675611)
 
