@@ -1,0 +1,31 @@
+# This file is used to build the infrastructure for a deployment.
+# After editing something here, apply the changes on the Diploi dashboard.
+# For more information, see https://diploi.com/yaml
+
+diploiVersion: v1.0
+components:
+  - hosts:
+      - port: 3000
+        endpoint: true
+        name: App
+        identifier: app
+    name: SvelteKit
+    identifier: sveltekit
+    folder: /
+    package: https://github.com/diploi/component-sveltekit#v2.59.1
+    containerCommands:
+      productionStart: node build/index.js
+      developmentStart: pnpm run dev --host
+    env:
+      include:
+        - postgres.DATABASE_URL
+        - value: postgres
+          name: DB_DIALECT
+        - value: gateway
+          name: LLM_PROVIDER
+        - value: google/gemini-2.0-flash
+          name: LLM
+addons:
+  - name: PostgreSQL
+    identifier: postgres
+    package: https://github.com/diploi/addon-postgres#v18.3-url

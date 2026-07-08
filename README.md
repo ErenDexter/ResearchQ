@@ -21,6 +21,7 @@ It runs entirely on your own machine (SQLite + Node.js) or, if you prefer, on yo
 - [Project status](#project-status)
 - [Screenshots](#screenshots)
 - [Quick start](#quick-start)
+- [Deployment](#deployment)
 - [Installation](#installation)
 - [Configuration](#configuration)
 - [Feature overview](#feature-overview)
@@ -95,6 +96,40 @@ pnpm dev
 Open http://localhost:5173 — you'll be redirected straight to the "Create your first project" form. Describe your research domain in plain language, and the AI will generate keywords, analysis dimensions, and relevance criteria in about 30 seconds.
 
 See [docs/quickstart.md](docs/quickstart.md) for a step-by-step walkthrough from install to first exported cross-reference matrix.
+
+---
+
+## Deployment
+
+### **Deploy to Diploi**
+
+[![launch with diploi button](https://diploi.com/launch-big.svg)](https://diploi.com/launch/ErenDexter/ResearchQ)
+
+1. **Launch the project**
+
+Click the launch button above to create a new Diploi deployment.
+
+2. **Add environment variables**
+
+In Diploi, open your deployment page and go to **Options > SvelteKit > Environment**. Add any required environment variables that are missing.
+
+3. **Run the database migration**
+
+Click **Connect +** in the SvelteKit section, then run the copied SSH command in your local terminal.
+
+In the `/app` directory, run:
+
+```bash
+pnpm run db:push
+```
+
+After that, accept the db queries to be applied interactively in the terminal by selecting "Yes, I want to execute all statements".
+
+4. **Preview the deployment**
+
+Open the provided preview URL from your Diploi deployment page.
+
+For more information, please visit [diploi.com](https://diploi.com/)
 
 ---
 
