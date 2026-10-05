@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { getProjectId } from '$lib/current-project';
 	import Card from '$lib/components/ui/Card.svelte';
 	import Badge from '$lib/components/ui/Badge.svelte';
 	import { BarChart3, Globe, Clock, Target, Users, Lightbulb, Wrench, Monitor, Hash } from 'lucide-svelte';
@@ -6,10 +7,6 @@
 	let analysis = $state<any>(null);
 	let loading = $state(true);
 
-	function getProjectId(): string {
-		if (typeof window === 'undefined') return '';
-		return (window as any).__currentProjectId || localStorage.getItem('currentProjectId') || '';
-	}
 
 	async function loadAnalysis() {
 		loading = true;

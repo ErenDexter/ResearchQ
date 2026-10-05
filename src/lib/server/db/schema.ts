@@ -10,8 +10,12 @@
  * checking; at runtime the correct dialect's tables are exported.
  *
  * For drizzle-kit (migrations), use the dialect-specific files directly:
- *   schema.sqlite.ts — for `pnpm db:push:sqlite`
+ *   schema.sqlite.ts — for `pnpm db:push`
  *   schema.pg.ts     — for `pnpm db:push:pg`
+ *
+ * Keep the two files in sync (same tables, columns and indexes). In the
+ * SQLite file, write expression defaults in parentheses — e.g.
+ * sql`(CURRENT_TIMESTAMP)` — or drizzle-kit sees a phantom diff on every push.
  */
 import { env } from '$env/dynamic/private';
 import * as sqliteSchema from './schema.sqlite';

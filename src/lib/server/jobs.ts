@@ -9,7 +9,8 @@
  * 5. Smart keyword filtering → idempotent (upsert)
  *
  * On failure, completedPhases tracks which phases finished.
- * On retry, completed phases are skipped entirely.
+ * On retry, completed phases are skipped entirely and unfinished phases only
+ * process the papers they have not handled yet.
  */
 
 import { db } from './db';
@@ -27,10 +28,9 @@ import {
 	searchCursors,
 	jobWorksCache
 } from './db/schema';
-import { eq, and, isNull, sql } from 'drizzle-orm';
+import { eq, and, isNull, isNotNull, count, type SQL } from 'drizzle-orm';
 import {
 	searchByJournal,
-	searchByAuthor,
 	searchByAuthorOnly,
 	searchByTopic,
 	searchCitationsForward,
@@ -50,7 +50,40 @@ import {
 	type PaperInput
 } from './gemini';
 import { loadPromptContext } from './project-context';
-import type { PromptContext } from './prompts';
+
+export const SEARCH_TYPES = [
+	'journal',
+	'author',
+	'topic',
+	'citation_forward',
+	'citation_backward',
+	'related',
+	'database'
+] as const;
+
+export type SearchType = (typeof SEARCH_TYPES)[number];
+
+/** Pauses between LLM calls to stay under provider rate limits (tests set these to 0). */
+export const pipelineDelays = {
+	betweenFilterBatchesMs: 1000,
+	betweenExtractionsMs: 500
+};
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Search types whose query may be left empty (topic falls back to the project keywords). */
+export const OPTIONAL_QUERY_TYPES: readonly SearchType[] = ['topic'];
+
+/**
+ * Splits a free-text topic query into search terms. Commas, semicolons and
+ * new lines separate terms; a query without separators is one term.
+ */
+export function parseTopicTerms(query: string): string[] {
+	return query
+		.split(/[,;\n]/)
+		.map((t) => t.trim())
+		.filter(Boolean);
+}
 
 // ─── Prefixed logger ──────────────────────────────────────────────
 
@@ -66,6 +99,10 @@ function logError(jobId: string, ...args: unknown[]) {
 	console.error(`[job:${jobId.slice(0, 8)}]`, ...args);
 }
 
+function errorMessage(err: unknown): string {
+	return err instanceof Error ? err.message : String(err);
+}
+
 // ─── Checkpoint helpers ───────────────────────────────────────────
 
 function getCompletedPhases(raw: string | null): Set<string> {
@@ -78,6 +115,11 @@ async function markPhaseComplete(jobId: string, phase: string, current: Set<stri
 	await db.update(searchJobs).set({
 		completedPhases: JSON.stringify([...current])
 	}).where(eq(searchJobs.id, jobId));
+}
+
+async function countPapers(where: SQL | undefined): Promise<number> {
+	const [row] = await db.select({ n: count() }).from(papers).where(where);
+	return row?.n ?? 0;
 }
 
 // ─── Load project keywords from DB ───────────────────────────────
@@ -134,20 +176,29 @@ async function upsertAuthor(
 
 async function upsertKeyword(term: string, isBase: boolean = false): Promise<string> {
 	const normalized = term.toLowerCase().trim();
-	const existing = await db
+	await db
+		.insert(keywords)
+		.values({ term: normalized, isBaseKeyword: isBase })
+		.onConflictDoNothing({ target: keywords.term });
+
+	const [row] = await db
 		.select({ id: keywords.id })
 		.from(keywords)
 		.where(eq(keywords.term, normalized))
 		.limit(1);
-
-	if (existing.length > 0) return existing[0].id;
-
-	const id = crypto.randomUUID();
-	await db.insert(keywords).values({ id, term: normalized, isBaseKeyword: isBase });
-	return id;
+	return row.id;
 }
 
 // ─── Store a paper and its relations ────────────────────────────────
+
+async function findPaperInProject(projectId: string, openalexId: string) {
+	const [existing] = await db
+		.select({ id: papers.id })
+		.from(papers)
+		.where(and(eq(papers.projectId, projectId), eq(papers.openalexId, openalexId)))
+		.limit(1);
+	return existing ?? null;
+}
 
 async function storePaper(
 	work: OpenAlexWork,
@@ -164,16 +215,9 @@ async function storePaper(
 		return null;
 	}
 
-	// Check for duplicate
-	const existing = await db
-		.select({ id: papers.id })
-		.from(papers)
-		.where(eq(papers.openalexId, openalexId))
-		.limit(1);
-
-	if (existing.length > 0) {
-		return existing[0].id;
-	}
+	// Papers are unique per project — the same work may live in several projects.
+	const existing = await findPaperInProject(projectId, openalexId);
+	if (existing) return existing.id;
 
 	const paperId = crypto.randomUUID();
 	const abstract = reconstructAbstract(work.abstract_inverted_index);
@@ -219,48 +263,27 @@ async function storePaper(
 		}
 	}
 
-	// Store author relationships
-	for (const authorship of work.authorships) {
+	// Store author relationships (position = byline order)
+	for (const [position, authorship] of work.authorships.entries()) {
 		const authorId = await upsertAuthor(
 			authorship.author.display_name,
 			authorship.author.id,
 			authorship.author.orcid,
 			authorship.institutions?.[0]?.display_name || null
 		);
-		try {
-			await db.insert(paperAuthors).values({
-				paperId,
-				authorId,
-				position:
-					authorship.author_position === 'first'
-						? 0
-						: authorship.author_position === 'last'
-							? 999
-							: 1
-			});
-		} catch {
-			// unique constraint
-		}
+		await db.insert(paperAuthors).values({ paperId, authorId, position }).onConflictDoNothing();
 	}
 
 	// Store paper-keyword relationships from OpenAlex keywords
 	for (const kw of work.keywords || []) {
 		if (!kw.display_name) continue;
 		const keywordId = await upsertKeyword(kw.display_name);
-		try {
-			await db.insert(paperKeywords).values({ paperId, keywordId });
-		} catch {
-			// unique constraint
-		}
+		await db.insert(paperKeywords).values({ paperId, keywordId }).onConflictDoNothing();
 	}
 
 	// Store journal relationship
 	if (journalId) {
-		try {
-			await db.insert(paperJournals).values({ paperId, journalId });
-		} catch {
-			// unique constraint
-		}
+		await db.insert(paperJournals).values({ paperId, journalId }).onConflictDoNothing();
 	}
 
 	return paperId;
@@ -281,6 +304,9 @@ export async function runSearchJob(jobId: string) {
 
 		const { type, query, projectId, dateFrom, dateTo, skipRelevanceFilter } = job[0];
 		if (!projectId) throw new Error('Job has no project associated');
+		if (!(SEARCH_TYPES as readonly string[]).includes(type)) {
+			throw new Error(`Unsupported search type "${type}"`);
+		}
 
 		const completed = getCompletedPhases(job[0].completedPhases);
 		const isResume = completed.size > 0;
@@ -292,7 +318,10 @@ export async function runSearchJob(jobId: string) {
 		const keywordTerms = await getProjectKeywords(projectId);
 		log(jobId, `  project="${promptCtx.projectName}", ${keywordTerms.length} keywords, ${promptCtx.dimensions.length} dimensions`);
 
-		if (keywordTerms.length === 0) {
+		const topicTerms = type === 'topic' ? parseTopicTerms(query) : [];
+		const needsProjectKeywords =
+			type === 'journal' || type === 'database' || (type === 'topic' && topicTerms.length === 0);
+		if (needsProjectKeywords && keywordTerms.length === 0) {
 			throw new Error('No keywords found for this project. Add keywords first.');
 		}
 
@@ -304,9 +333,12 @@ export async function runSearchJob(jobId: string) {
 		// ════════════════════════════════════════════════════════════
 		if (!completed.has('search')) {
 			log(jobId, `── Phase 1: Searching OpenAlex (strategy: ${type}) ──`);
-			await updateJob(jobId, { status: 'searching', progressPct: 5, lastPhase: 'searching', statusMessage: `Searching OpenAlex (${type}: "${query}")${dateRangeLabel}...` });
+			await updateJob(jobId, { status: 'searching', progressPct: 5, lastPhase: 'searching', statusMessage: `Searching OpenAlex (${type}: "${query || 'project keywords'}")${dateRangeLabel}...` });
 
 			let works: OpenAlexWork[] = [];
+			// Database cursors are only persisted once the works they produced are cached,
+			// so a crash in between re-fetches the page instead of skipping it.
+			let saveCursors: (() => Promise<void>) | null = null;
 
 			if (type === 'journal') {
 				log(jobId, `  resolving journal: "${query}"`);
@@ -339,8 +371,9 @@ export async function runSearchJob(jobId: string) {
 					logWarn(jobId, `  author not found: "${query}"`);
 				}
 			} else if (type === 'topic') {
-				log(jobId, `  topic search with ${keywordTerms.length} keywords`);
-				works = await searchByTopic(keywordTerms, 3, dateFrom || undefined, dateTo || undefined);
+				const terms = topicTerms.length > 0 ? topicTerms : keywordTerms;
+				log(jobId, `  topic search with ${terms.length} ${topicTerms.length > 0 ? 'query terms' : 'project keywords'}`);
+				works = await searchByTopic(terms, 3, dateFrom || undefined, dateTo || undefined);
 			} else if (type === 'citation_forward') {
 				works = await searchCitationsForward(query);
 			} else if (type === 'citation_backward') {
@@ -375,14 +408,16 @@ export async function runSearchJob(jobId: string) {
 					}
 					const result = await searchByDatabase(publisherId, keywordTerms, maxResults, batchCursors, dateFrom || undefined, dateTo || undefined);
 					works = result.works;
-					for (const bc of result.batchCursors) {
-						const existing = savedCursorRows.find((r) => r.searchQuery === bc.searchQuery);
-						if (existing) {
-							await db.update(searchCursors).set({ nextCursor: bc.nextCursor, totalFetched: (existing.totalFetched || 0) + works.length, lastJobId: jobId, updatedAt: new Date().toISOString() }).where(eq(searchCursors.id, existing.id));
-						} else {
-							await db.insert(searchCursors).values({ projectId, publisherId, publisherName: publisher.display_name, searchQuery: bc.searchQuery, nextCursor: bc.nextCursor, totalFetched: works.length, lastJobId: jobId });
+					saveCursors = async () => {
+						for (const bc of result.batchCursors) {
+							const existing = savedCursorRows.find((r) => r.searchQuery === bc.searchQuery);
+							if (existing) {
+								await db.update(searchCursors).set({ nextCursor: bc.nextCursor, totalFetched: (existing.totalFetched || 0) + bc.fetched, lastJobId: jobId, updatedAt: new Date().toISOString() }).where(eq(searchCursors.id, existing.id));
+							} else {
+								await db.insert(searchCursors).values({ projectId, publisherId, publisherName: publisher.display_name, searchQuery: bc.searchQuery, nextCursor: bc.nextCursor, totalFetched: bc.fetched, lastJobId: jobId });
+							}
 						}
-					}
+					};
 				} else {
 					logWarn(jobId, `  publisher not found: "${query}"`);
 				}
@@ -392,7 +427,8 @@ export async function runSearchJob(jobId: string) {
 			await updateJob(jobId, { totalFound: works.length, progressPct: 15 });
 
 			if (works.length === 0) {
-				await updateJob(jobId, { status: 'completed', progressPct: 100, relevantCount: 0, completedAt: new Date().toISOString(), statusMessage: 'No papers found.' });
+				await saveCursors?.();
+				await updateJob(jobId, { status: 'completed', progressPct: 100, relevantCount: 0, completedAt: new Date().toISOString(), lastPhase: 'completed', statusMessage: 'No papers found.' });
 				return;
 			}
 
@@ -410,6 +446,7 @@ export async function runSearchJob(jobId: string) {
 				}
 			}
 
+			await saveCursors?.();
 			await markPhaseComplete(jobId, 'search', completed);
 			log(jobId, `  ✓ Phase 1 complete: ${works.length} works cached`);
 		} else {
@@ -428,7 +465,7 @@ export async function runSearchJob(jobId: string) {
 				.from(jobWorksCache)
 				.where(and(eq(jobWorksCache.jobId, jobId), eq(jobWorksCache.stored, false)));
 
-			const totalCached = (await db.select({ count: sql<number>`count(*)` }).from(jobWorksCache).where(eq(jobWorksCache.jobId, jobId)))[0]?.count || 0;
+			const [{ n: totalCached }] = await db.select({ n: count() }).from(jobWorksCache).where(eq(jobWorksCache.jobId, jobId));
 			const alreadyStored = totalCached - unstoredWorks.length;
 
 			log(jobId, `── Phase 2: Storing papers (${unstoredWorks.length} remaining, ${alreadyStored} already stored) ──`);
@@ -440,9 +477,7 @@ export async function runSearchJob(jobId: string) {
 				const cached = unstoredWorks[wi];
 				const work: OpenAlexWork = JSON.parse(cached.workData);
 
-				const existingCheck = await db.select({ id: papers.id }).from(papers).where(eq(papers.openalexId, work.id)).limit(1);
-
-				if (existingCheck.length > 0) {
+				if (await findPaperInProject(projectId, work.id)) {
 					dupCount++;
 				} else {
 					const paperId = await storePaper(work, jobId, projectId, `${type}_search`, journalId);
@@ -456,12 +491,12 @@ export async function runSearchJob(jobId: string) {
 					const storeProgress = 20 + ((alreadyStored + wi + 1) / totalCached) * 20;
 					await updateJob(jobId, {
 						progressPct: Math.min(storeProgress, 40),
-						statusMessage: `Storing: "${work.title?.slice(0, 60) || '(untitled)'}..." (${alreadyStored + wi + 1}/${totalCached}) — ${newCount} new, ${dupCount} skipped`
+						statusMessage: `Storing: "${work.title?.slice(0, 60) || '(untitled)'}..." (${alreadyStored + wi + 1}/${totalCached}) — ${newCount} new, ${dupCount} already in project`
 					});
 				}
 			}
 
-			log(jobId, `  ✓ Phase 2 complete: ${newCount} new, ${dupCount} duplicates`);
+			log(jobId, `  ✓ Phase 2 complete: ${newCount} new, ${dupCount} already in project`);
 			await markPhaseComplete(jobId, 'store', completed);
 		} else {
 			log(jobId, `  ⏭ Phase 2 (Store): already completed, skipping`);
@@ -475,14 +510,14 @@ export async function runSearchJob(jobId: string) {
 		if (completed.has('filter')) {
 			log(jobId, `  ⏭ Phase 3 (Filter): already completed, skipping`);
 		} else if (skipRelevanceFilter) {
-			// User opted out of LLM relevance filtering — mark all as relevant and skip
+			// User opted out of LLM relevance filtering — keep everything, recorded as auto-included
 			log(jobId, `── Phase 3: SKIPPED (user opted out of LLM filtering) — marking all as relevant ──`);
 			await db
 				.update(papers)
-				.set({ isRelevant: true })
+				.set({ isRelevant: true, relevanceSource: 'auto_include' })
 				.where(and(eq(papers.searchJobId, jobId), isNull(papers.isRelevant)));
-			const total = (await db.select({ count: sql<number>`count(*)` }).from(papers).where(eq(papers.searchJobId, jobId)))[0]?.count || 0;
-			await updateJob(jobId, { progressPct: 60, relevantCount: total, statusMessage: `Phase 3 skipped — ${total} papers marked relevant without LLM filtering` });
+			const total = await countPapers(eq(papers.searchJobId, jobId));
+			await updateJob(jobId, { progressPct: 60, relevantCount: total, statusMessage: `Phase 3 skipped — ${total} papers kept without AI screening` });
 			await markPhaseComplete(jobId, 'filter', completed);
 		} else {
 			const unfilteredPapers = await db
@@ -490,7 +525,7 @@ export async function runSearchJob(jobId: string) {
 				.from(papers)
 				.where(and(eq(papers.searchJobId, jobId), isNull(papers.isRelevant)));
 
-			const alreadyFiltered = (await db.select({ count: sql<number>`count(*)` }).from(papers).where(and(eq(papers.searchJobId, jobId), sql`${papers.isRelevant} IS NOT NULL`)))[0]?.count || 0;
+			const alreadyFiltered = await countPapers(and(eq(papers.searchJobId, jobId), isNotNull(papers.isRelevant)));
 
 			log(jobId, `── Phase 3: Filtering relevance (${unfilteredPapers.length} remaining, ${alreadyFiltered} already filtered) ──`);
 
@@ -499,7 +534,8 @@ export async function runSearchJob(jobId: string) {
 			}));
 
 			const BATCH_SIZE = 15;
-			let relevantCount = (await db.select({ count: sql<number>`count(*)` }).from(papers).where(and(eq(papers.searchJobId, jobId), eq(papers.isRelevant, true))))[0]?.count || 0;
+			let relevantCount = await countPapers(and(eq(papers.searchJobId, jobId), eq(papers.isRelevant, true)));
+			let fallbackCount = 0;
 			const totalBatches = Math.ceil(paperInputs.length / BATCH_SIZE);
 
 			for (let i = 0; i < paperInputs.length; i += BATCH_SIZE) {
@@ -508,30 +544,28 @@ export async function runSearchJob(jobId: string) {
 
 				log(jobId, `  filtering batch ${batchNum}/${totalBatches} (${batch.length} papers)`);
 
-				try {
-					const results = await filterRelevance(batch, promptCtx);
-					const batchRelevant = results.filter((r) => r.isRelevant).length;
-
-					for (const result of results) {
-						await db.update(papers).set({ isRelevant: result.isRelevant }).where(eq(papers.id, result.id));
-						if (result.isRelevant) relevantCount++;
-					}
-
-					log(jobId, `    → ${batchRelevant}/${batch.length} relevant (total: ${relevantCount})`);
-				} catch (err) {
-					logError(jobId, `  batch ${batchNum} failed, marking as relevant:`, err instanceof Error ? err.message : err);
-					for (const p of batch) {
-						await db.update(papers).set({ isRelevant: true }).where(eq(papers.id, p.id));
-						relevantCount++;
-					}
+				// API errors propagate: the job fails and a retry resumes with the unscreened papers.
+				const results = await filterRelevance(batch, promptCtx);
+				for (const result of results) {
+					await db
+						.update(papers)
+						.set({ isRelevant: result.isRelevant, relevanceSource: result.source })
+						.where(eq(papers.id, result.id));
+					if (result.isRelevant) relevantCount++;
+					if (result.source === 'ai_fallback') fallbackCount++;
 				}
+
+				const batchRelevant = results.filter((r) => r.isRelevant).length;
+				const batchFallback = results.filter((r) => r.source === 'ai_fallback').length;
+				log(jobId, `    → ${batchRelevant}/${batch.length} relevant (total: ${relevantCount})${batchFallback ? `, ${batchFallback} kept by default (AI output unusable)` : ''}`);
 
 				const progress = 40 + ((i + BATCH_SIZE) / paperInputs.length) * 20;
 				await updateJob(jobId, { progressPct: Math.min(progress, 60), relevantCount, statusMessage: `Filtering: batch ${batchNum}/${totalBatches} — ${relevantCount} relevant` });
 
-				await new Promise((r) => setTimeout(r, 1000));
+				await sleep(pipelineDelays.betweenFilterBatchesMs);
 			}
 
+			if (fallbackCount > 0) logWarn(jobId, `  ${fallbackCount} papers were kept by default because the AI output was unusable`);
 			log(jobId, `  ✓ Phase 3 complete: ${relevantCount} relevant`);
 			await updateJob(jobId, { relevantCount });
 			await markPhaseComplete(jobId, 'filter', completed);
@@ -548,25 +582,43 @@ export async function runSearchJob(jobId: string) {
 				.from(papers)
 				.where(and(eq(papers.searchJobId, jobId), eq(papers.isRelevant, true), isNull(papers.summary)));
 
-			const alreadyExtracted = (await db.select({ count: sql<number>`count(*)` }).from(papers).where(and(eq(papers.searchJobId, jobId), eq(papers.isRelevant, true), sql`${papers.summary} IS NOT NULL`)))[0]?.count || 0;
+			const alreadyExtracted = await countPapers(and(eq(papers.searchJobId, jobId), eq(papers.isRelevant, true), isNotNull(papers.summary)));
+			const totalToExtract = unextracted.length + alreadyExtracted;
 
 			log(jobId, `── Phase 4: Extracting metadata (${unextracted.length} remaining, ${alreadyExtracted} already done) ──`);
 
 			const allExtractedKeywords: string[] = [];
 			let extractedOk = alreadyExtracted;
 			let extractedFail = 0;
+			let lastError = '';
 
 			for (let i = 0; i < unextracted.length; i++) {
 				const p = unextracted[i];
 				const paperInput: PaperInput = { id: p.id, title: p.title, abstract: p.abstract || '', keywords: [], publicationYear: p.publicationYear ?? undefined };
+				const position = alreadyExtracted + i + 1;
 
-				log(jobId, `  [${alreadyExtracted + i + 1}] extracting: "${p.title.slice(0, 50)}..."`);
+				log(jobId, `  [${position}] extracting: "${p.title.slice(0, 50)}..."`);
 
 				try {
 					const metadata = await extractMetadata(paperInput, promptCtx);
-
 					log(jobId, `    → region="${metadata.focusedRegion}", platform="${metadata.platformDomain}"`);
 
+					const tags = await classifyAnalysisFramework({ ...paperInput, summary: metadata.summary, methodologySummary: metadata.methodologySummary }, promptCtx);
+
+					for (const kw of metadata.extractedKeywords) {
+						const kwId = await upsertKeyword(kw, false);
+						await db.insert(paperKeywords).values({ paperId: p.id, keywordId: kwId }).onConflictDoNothing();
+					}
+
+					// Replace (not append) tags so a retried paper never ends up with duplicates.
+					await db.delete(analysisTags).where(eq(analysisTags.paperId, p.id));
+					for (const [dimension, value] of Object.entries(tags)) {
+						if (value) {
+							await db.insert(analysisTags).values({ paperId: p.id, dimension, value });
+						}
+					}
+
+					// Written last: a non-null summary marks the paper as fully processed.
 					await db.update(papers).set({
 						summary: metadata.summary, methodologySummary: metadata.methodologySummary,
 						targetPopulation: metadata.targetPopulation, focusedRegion: metadata.focusedRegion,
@@ -574,30 +626,17 @@ export async function runSearchJob(jobId: string) {
 					}).where(eq(papers.id, p.id));
 
 					allExtractedKeywords.push(...metadata.extractedKeywords);
-
-					for (const kw of metadata.extractedKeywords) {
-						const kwId = await upsertKeyword(kw, false);
-						try { await db.insert(paperKeywords).values({ paperId: p.id, keywordId: kwId }); } catch { /* unique */ }
-					}
-
-					const tags = await classifyAnalysisFramework({ ...paperInput, summary: metadata.summary, methodologySummary: metadata.methodologySummary }, promptCtx);
-
-					for (const [dimension, value] of Object.entries(tags)) {
-						if (value) {
-							await db.insert(analysisTags).values({ paperId: p.id, dimension, value });
-						}
-					}
-
 					extractedOk++;
 				} catch (err) {
 					extractedFail++;
-					logError(jobId, `    ✗ failed: ${err instanceof Error ? err.message : err}`);
+					lastError = errorMessage(err);
+					logError(jobId, `    ✗ failed: ${lastError}`);
 				}
 
-				const progress = 60 + ((alreadyExtracted + i + 1) / (unextracted.length + alreadyExtracted)) * 33;
-				await updateJob(jobId, { progressPct: Math.min(progress, 93), statusMessage: `Extracting [${alreadyExtracted + i + 1}/${unextracted.length + alreadyExtracted}]: "${p.title.slice(0, 50)}..."` });
+				const progress = 60 + (position / totalToExtract) * 33;
+				await updateJob(jobId, { progressPct: Math.min(progress, 93), statusMessage: `Extracting [${position}/${totalToExtract}]: "${p.title.slice(0, 50)}..."` });
 
-				await new Promise((r) => setTimeout(r, 500));
+				await sleep(pipelineDelays.betweenExtractionsMs);
 			}
 
 			log(jobId, `  ✓ Phase 4 complete: ${extractedOk} ok, ${extractedFail} failed`);
@@ -611,19 +650,28 @@ export async function runSearchJob(jobId: string) {
 				try {
 					const kwResults = await evaluateKeywordRelevance(uniqueKw, promptCtx);
 					const accepted = kwResults.filter((r) => r.isRelevant && r.score >= 0.6);
-					log(jobId, `  keywords: ${accepted.length} accepted, ${kwResults.length - accepted.length} rejected`);
+					log(jobId, `  keywords: ${accepted.length} accepted, ${uniqueKw.length - accepted.length} rejected`);
 
 					for (const result of accepted) {
 						const kwId = await upsertKeyword(result.keyword, false);
-						try {
-							await db.insert(projectKeywords).values({ projectId, keywordId: kwId, isBaseKeyword: false, relevanceScore: result.score });
-						} catch {
-							await db.update(projectKeywords).set({ relevanceScore: result.score }).where(and(eq(projectKeywords.projectId, projectId), eq(projectKeywords.keywordId, kwId)));
-						}
+						await db
+							.insert(projectKeywords)
+							.values({ projectId, keywordId: kwId, isBaseKeyword: false, relevanceScore: result.score })
+							.onConflictDoUpdate({
+								target: [projectKeywords.projectId, projectKeywords.keywordId],
+								set: { relevanceScore: result.score }
+							});
 					}
 				} catch (err) {
-					logError(jobId, '  keyword evaluation failed:', err instanceof Error ? err.message : err);
+					logError(jobId, '  keyword evaluation failed:', errorMessage(err));
 				}
+			}
+
+			if (extractedFail > 0) {
+				// Leave the phase open so a retry processes only the papers that failed.
+				throw new Error(
+					`Metadata extraction failed for ${extractedFail} of ${unextracted.length} papers (last error: ${lastError}). Retry to process the remaining papers.`
+				);
 			}
 
 			await markPhaseComplete(jobId, 'extract', completed);
@@ -635,8 +683,8 @@ export async function runSearchJob(jobId: string) {
 		// PHASE 5: Complete — clean up cache
 		// ════════════════════════════════════════════════════════════
 		const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-		const totalPapers = (await db.select({ count: sql<number>`count(*)` }).from(papers).where(eq(papers.searchJobId, jobId)))[0]?.count || 0;
-		const relevantCount = (await db.select({ count: sql<number>`count(*)` }).from(papers).where(and(eq(papers.searchJobId, jobId), eq(papers.isRelevant, true))))[0]?.count || 0;
+		const totalPapers = await countPapers(eq(papers.searchJobId, jobId));
+		const relevantCount = await countPapers(and(eq(papers.searchJobId, jobId), eq(papers.isRelevant, true)));
 
 		// Clean up the works cache
 		await db.delete(jobWorksCache).where(eq(jobWorksCache.jobId, jobId));
@@ -650,11 +698,11 @@ export async function runSearchJob(jobId: string) {
 		log(jobId, `✓ Job complete in ${elapsed}s — ${totalPapers} papers, ${relevantCount} relevant`);
 	} catch (err) {
 		const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-		logError(jobId, `✗ Job failed after ${elapsed}s:`, err instanceof Error ? err.message : err);
+		logError(jobId, `✗ Job failed after ${elapsed}s:`, errorMessage(err));
 		if (err instanceof Error && err.stack) logError(jobId, err.stack);
 		await updateJob(jobId, {
 			status: 'failed',
-			error: err instanceof Error ? err.message : String(err),
+			error: errorMessage(err),
 			completedAt: new Date().toISOString()
 		});
 	}

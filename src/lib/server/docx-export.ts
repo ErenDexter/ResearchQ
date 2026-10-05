@@ -1,6 +1,9 @@
 /**
  * DOCX export — converts markdown content and structured data into Word documents.
  * Uses the `docx` npm package for server-side generation.
+ *
+ * Structured (JSON) outputs are first rendered to markdown with the shared
+ * review-output renderer, so DOCX, Markdown and the UI show the same tables.
  */
 
 import {
@@ -13,27 +16,27 @@ import {
 	HeadingLevel,
 	Packer,
 	AlignmentType,
+	LevelFormat,
 	WidthType,
 	BorderStyle
 } from 'docx';
+import { outputBodyToMarkdown, type StoredOutput } from '$lib/review-output';
 
 // ─── Markdown to DOCX ─────────────────────────────────────────────
 
-function parseInlineFormatting(text: string): TextRun[] {
+/** Splits inline **bold** / *italic* markup into runs; stray asterisks are kept as text. */
+export function parseInlineFormatting(text: string): TextRun[] {
 	const runs: TextRun[] = [];
-	// Simple bold/italic parsing: **bold**, *italic*
-	const regex = /(\*\*(.+?)\*\*|\*(.+?)\*|([^*]+))/g;
+	const regex = /\*\*(.+?)\*\*|\*([^*\s][^*]*?)\*|([^*]+|\*)/g;
 	let match;
 
 	while ((match = regex.exec(text)) !== null) {
-		if (match[2]) {
-			// **bold**
-			runs.push(new TextRun({ text: match[2], bold: true }));
-		} else if (match[3]) {
-			// *italic*
-			runs.push(new TextRun({ text: match[3], italics: true }));
-		} else if (match[4]) {
-			runs.push(new TextRun({ text: match[4] }));
+		if (match[1] !== undefined) {
+			runs.push(new TextRun({ text: match[1], bold: true }));
+		} else if (match[2] !== undefined) {
+			runs.push(new TextRun({ text: match[2], italics: true }));
+		} else if (match[3] !== undefined) {
+			runs.push(new TextRun({ text: match[3] }));
 		}
 	}
 
@@ -44,40 +47,41 @@ function parseInlineFormatting(text: string): TextRun[] {
 	return runs;
 }
 
+/** Splits a markdown table row on unescaped pipes and unescapes `\|`. */
+export function splitTableRow(line: string): string[] {
+	return line
+		.trim()
+		.replace(/^\|/, '')
+		.replace(/(?<!\\)\|$/, '')
+		.split(/(?<!\\)\|/)
+		.map((c) => c.trim().replace(/\\\|/g, '|'));
+}
+
+const TABLE_SEPARATOR = /^\|?(\s*:?-{3,}:?\s*\|)+\s*(:?-{3,}:?\s*)?$/;
+
 function markdownTableToDocxTable(lines: string[]): Table {
-	// Parse markdown table lines into rows
-	const rows: string[][] = [];
-	for (const line of lines) {
-		const trimmed = line.trim();
-		if (trimmed.startsWith('|') && !trimmed.match(/^\|[\s-|]+\|$/)) {
-			const cells = trimmed
-				.split('|')
-				.slice(1, -1)
-				.map((c) => c.trim());
-			rows.push(cells);
-		}
-	}
+	const rows = lines.filter((l) => !TABLE_SEPARATOR.test(l.trim())).map(splitTableRow);
 
 	if (rows.length === 0) {
 		return new Table({ rows: [new TableRow({ children: [new TableCell({ children: [new Paragraph('No data')] })] })] });
 	}
 
-	const noBorder = { style: BorderStyle.SINGLE, size: 1, color: 'CCCCCC' };
-	const borders = { top: noBorder, bottom: noBorder, left: noBorder, right: noBorder };
+	const border = { style: BorderStyle.SINGLE, size: 1, color: 'CCCCCC' };
+	const borders = { top: border, bottom: border, left: border, right: border };
+	const width = Math.max(...rows.map((r) => r.length));
 
 	return new Table({
 		width: { size: 100, type: WidthType.PERCENTAGE },
 		rows: rows.map((cells, rowIdx) =>
 			new TableRow({
-				children: cells.map(
+				tableHeader: rowIdx === 0,
+				children: Array.from({ length: width }, (_, i) => cells[i] ?? '').map(
 					(cell) =>
 						new TableCell({
 							borders,
 							children: [
 								new Paragraph({
-									children: rowIdx === 0
-										? [new TextRun({ text: cell, bold: true, size: 20 })]
-										: [new TextRun({ text: cell, size: 20 })]
+									children: [new TextRun({ text: cell, bold: rowIdx === 0, size: 20 })]
 								})
 							]
 						})
@@ -88,15 +92,33 @@ function markdownTableToDocxTable(lines: string[]): Table {
 }
 
 export async function markdownToDocx(md: string): Promise<Buffer> {
-	const lines = md.split('\n');
+	const lines = md.split(/\r?\n/);
 	const children: (Paragraph | Table)[] = [];
 	let i = 0;
+	// Each separate numbered list gets its own numbering instance so it restarts at 1.
+	let listInstance = 0;
+	let previousWasNumbered = false;
 
 	while (i < lines.length) {
 		const line = lines[i];
+		let isNumbered = false;
+
+		// Fenced code block
+		if (line.trim().startsWith('```')) {
+			i++;
+			while (i < lines.length && !lines[i].trim().startsWith('```')) {
+				children.push(new Paragraph({ children: [new TextRun({ text: lines[i], font: 'Courier New', size: 18 })] }));
+				i++;
+			}
+			i++; // closing fence
+			previousWasNumbered = false;
+			continue;
+		}
 
 		// Headings
-		if (line.startsWith('### ')) {
+		if (line.startsWith('#### ')) {
+			children.push(new Paragraph({ text: line.slice(5), heading: HeadingLevel.HEADING_4 }));
+		} else if (line.startsWith('### ')) {
 			children.push(new Paragraph({ text: line.slice(4), heading: HeadingLevel.HEADING_3 }));
 		} else if (line.startsWith('## ')) {
 			children.push(new Paragraph({ text: line.slice(3), heading: HeadingLevel.HEADING_2 }));
@@ -111,10 +133,19 @@ export async function markdownToDocx(md: string): Promise<Buffer> {
 				i++;
 			}
 			children.push(markdownTableToDocxTable(tableLines));
+			previousWasNumbered = false;
 			continue; // skip i++ at end
 		}
+		// Block quote (used for notes)
+		else if (line.startsWith('> ')) {
+			children.push(new Paragraph({ children: parseInlineFormatting(line.slice(2)), indent: { left: 360 } }));
+		}
+		// Horizontal rule (checked before bullets: "---" would otherwise look like a list item)
+		else if (/^\s*(-{3,}|\*{3,})\s*$/.test(line)) {
+			children.push(new Paragraph({ text: '', spacing: { after: 200 } }));
+		}
 		// Bullet points
-		else if (line.match(/^\s*[-*]\s+/)) {
+		else if (/^\s*[-*]\s+/.test(line)) {
 			const text = line.replace(/^\s*[-*]\s+/, '');
 			children.push(
 				new Paragraph({
@@ -124,28 +155,29 @@ export async function markdownToDocx(md: string): Promise<Buffer> {
 			);
 		}
 		// Numbered list
-		else if (line.match(/^\s*\d+\.\s+/)) {
+		else if (/^\s*\d+\.\s+/.test(line)) {
+			isNumbered = true;
+			if (!previousWasNumbered) listInstance++;
 			const text = line.replace(/^\s*\d+\.\s+/, '');
 			children.push(
 				new Paragraph({
 					children: parseInlineFormatting(text),
-					numbering: { reference: 'default-numbering', level: 0 }
+					numbering: { reference: 'default-numbering', level: 0, instance: listInstance }
 				})
 			);
-		}
-		// Horizontal rule
-		else if (line.match(/^-{3,}$/)) {
-			children.push(new Paragraph({ text: '', spacing: { after: 200 } }));
 		}
 		// Empty line
 		else if (line.trim() === '') {
 			children.push(new Paragraph({ text: '' }));
+			// A blank line inside a list doesn't end it; anything else does.
+			isNumbered = previousWasNumbered;
 		}
 		// Regular paragraph
 		else {
 			children.push(new Paragraph({ children: parseInlineFormatting(line) }));
 		}
 
+		previousWasNumbered = isNumbered;
 		i++;
 	}
 
@@ -157,7 +189,7 @@ export async function markdownToDocx(md: string): Promise<Buffer> {
 					levels: [
 						{
 							level: 0,
-							format: 'decimal' as any,
+							format: LevelFormat.DECIMAL,
 							text: '%1.',
 							alignment: AlignmentType.LEFT
 						}
@@ -173,91 +205,8 @@ export async function markdownToDocx(md: string): Promise<Buffer> {
 
 // ─── Single output to DOCX ────────────────────────────────────────
 
-export async function outputToDocx(output: {
-	title: string;
-	contentMarkdown?: string | null;
-	contentJson?: string | null;
-}): Promise<Buffer> {
-	// If markdown content exists, convert it
-	if (output.contentMarkdown) {
-		return markdownToDocx(`# ${output.title}\n\n${output.contentMarkdown}`);
-	}
-
-	// If JSON content, build tables
-	if (output.contentJson) {
-		try {
-			const data = JSON.parse(output.contentJson);
-			const children: (Paragraph | Table)[] = [
-				new Paragraph({ text: output.title, heading: HeadingLevel.HEADING_1 }),
-				new Paragraph({ text: '' })
-			];
-
-			if (data.columns && data.rows) {
-				// Standard table format
-				children.push(jsonDataToDocxTable(data.columns, data.rows));
-			} else if (typeof data === 'object' && !Array.isArray(data)) {
-				// Named arrays (bibliometric, etc.)
-				for (const [key, value] of Object.entries(data)) {
-					const label = key.replace(/([A-Z])/g, ' $1').replace(/^./, (s) => s.toUpperCase());
-					children.push(new Paragraph({ text: label, heading: HeadingLevel.HEADING_2 }));
-
-					if (Array.isArray(value) && value.length > 0) {
-						const cols = Object.keys(value[0]);
-						children.push(jsonDataToDocxTable(cols, value));
-					}
-					children.push(new Paragraph({ text: '' }));
-				}
-			}
-
-			const doc = new Document({ sections: [{ children }] });
-			return Buffer.from(await Packer.toBuffer(doc));
-		} catch {
-			// Fallback: dump as text
-			return markdownToDocx(`# ${output.title}\n\n\`\`\`\n${output.contentJson}\n\`\`\``);
-		}
-	}
-
-	return markdownToDocx(`# ${output.title}\n\nNo content available.`);
-}
-
-function jsonDataToDocxTable(columns: string[], rows: any[]): Table {
-	const noBorder = { style: BorderStyle.SINGLE, size: 1, color: 'CCCCCC' };
-	const borders = { top: noBorder, bottom: noBorder, left: noBorder, right: noBorder };
-
-	const headerRow = new TableRow({
-		children: columns.map(
-			(col) =>
-				new TableCell({
-					borders,
-					children: [
-						new Paragraph({
-							children: [new TextRun({ text: String(col), bold: true, size: 20 })]
-						})
-					]
-				})
-		)
-	});
-
-	const dataRows = rows.slice(0, 100).map(
-		(row: any) =>
-			new TableRow({
-				children: columns.map((col) => {
-					const key = Object.keys(row).find(
-						(k) => k === col || k.toLowerCase() === col.toLowerCase().replace(/[^a-z]/g, '')
-					);
-					const val = String(row[key || col] ?? Object.values(row)[columns.indexOf(col)] ?? '—');
-					return new TableCell({
-						borders,
-						children: [new Paragraph({ children: [new TextRun({ text: val.slice(0, 200), size: 20 })] })]
-					});
-				})
-			})
-	);
-
-	return new Table({
-		width: { size: 100, type: WidthType.PERCENTAGE },
-		rows: [headerRow, ...dataRows]
-	});
+export async function outputToDocx(output: StoredOutput): Promise<Buffer> {
+	return markdownToDocx(`# ${output.title}\n\n${outputBodyToMarkdown(output, 2)}`);
 }
 
 // ─── Full review report to DOCX ───────────────────────────────────

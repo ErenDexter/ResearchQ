@@ -4,10 +4,14 @@
  * Generates methodology-specific outputs (PRISMA flow, tables, narratives, etc.)
  * using a strategy-per-output-type pattern: some are data-driven (SQL),
  * some are LLM-synthesized, some are hybrid.
+ *
+ * LLM-synthesized outputs never run on an empty evidence base, and they state
+ * which subset of the included studies they were generated from.
  */
 
 import { generateText } from 'ai';
-import { getModel } from './llm';
+import { z } from 'zod';
+import { getModel, generateStructured, MalformedLlmOutputError } from './llm';
 import { db } from './db';
 import {
 	papers,
@@ -16,13 +20,18 @@ import {
 	authors,
 	paperKeywords,
 	keywords,
-	analysisTags,
 	journals,
 	paperJournals,
+	projectDimensions,
+	projectReviews,
 	reviewOutputs
 } from './db/schema';
-import { eq, and, sql, desc } from 'drizzle-orm';
+import { and, asc, count, countDistinct, desc, eq, isNotNull, isNull, sql } from 'drizzle-orm';
+import { numeric } from './db/helpers';
 import { loadPromptContext } from './project-context';
+import { loadPaperRelations } from './paper-relations';
+import { SCREENING_DECISION_LABELS, screeningDecision, screeningReason, screeningSourceLabel } from '$lib/screening';
+import type { TableColumn } from '$lib/review-output';
 
 // ─── Output Type Registry ──────────────────────────────────────────
 
@@ -52,6 +61,32 @@ export const OUTPUT_TYPE_REGISTRY: Record<
 	summary_of_findings: { label: 'Summary of Findings', renderType: 'table', description: 'Key outcomes with evidence quality' }
 };
 
+/** An error with an HTTP status, so routes can tell user errors from server failures. */
+export class OutputGenerationError extends Error {
+	constructor(
+		message: string,
+		readonly status: number
+	) {
+		super(message);
+		this.name = 'OutputGenerationError';
+	}
+}
+
+export async function getReviewInProject(projectId: string, reviewId: string) {
+	const [review] = await db
+		.select()
+		.from(projectReviews)
+		.where(and(eq(projectReviews.id, reviewId), eq(projectReviews.projectId, projectId)))
+		.limit(1);
+	return review ?? null;
+}
+
+interface TableOutput {
+	columns: TableColumn[];
+	rows: Record<string, unknown>[];
+	note?: string;
+}
+
 // ─── Main generation dispatcher ────────────────────────────────────
 
 export async function generateOutput(
@@ -61,9 +96,12 @@ export async function generateOutput(
 	phaseId?: string
 ): Promise<{ id: string; contentJson: string | null; contentMarkdown: string | null }> {
 	const meta = OUTPUT_TYPE_REGISTRY[outputType];
-	if (!meta) throw new Error(`Unknown output type: ${outputType}`);
+	if (!meta) throw new OutputGenerationError(`Unknown output type: ${outputType}`, 400);
+	if (!(await getReviewInProject(projectId, reviewId))) {
+		throw new OutputGenerationError('Review not found in this project', 404);
+	}
 
-	let contentJson: any = null;
+	let contentJson: unknown = null;
 	let contentMarkdown: string | null = null;
 
 	switch (outputType) {
@@ -128,7 +166,17 @@ export async function generateOutput(
 			contentMarkdown = `Output type "${outputType}" generation is not yet implemented.`;
 	}
 
-	// Persist
+	// Regenerating replaces the previous version of this output for the same phase.
+	await db
+		.delete(reviewOutputs)
+		.where(
+			and(
+				eq(reviewOutputs.projectReviewId, reviewId),
+				eq(reviewOutputs.outputType, outputType),
+				phaseId ? eq(reviewOutputs.phaseId, phaseId) : isNull(reviewOutputs.phaseId)
+			)
+		);
+
 	const [output] = await db
 		.insert(reviewOutputs)
 		.values({
@@ -144,37 +192,76 @@ export async function generateOutput(
 	return { id: output.id, contentJson: output.contentJson, contentMarkdown: output.contentMarkdown };
 }
 
+// ─── Shared queries ────────────────────────────────────────────────
+
+const includedIn = (projectId: string) => and(eq(papers.projectId, projectId), eq(papers.isRelevant, true));
+
+/** Deterministic order for "which studies does the LLM see": most-cited first. */
+const studyOrder = [desc(papers.citedByCount), desc(papers.publicationYear), asc(papers.title)];
+
+async function countIncluded(projectId: string): Promise<number> {
+	const [{ n }] = await db.select({ n: count() }).from(papers).where(includedIn(projectId));
+	return n;
+}
+
+function sampleNote(used: number, total: number): string {
+	return used < total
+		? `Generated from ${used} of ${total} included studies (the ${used} most-cited). Studies beyond this sample were not considered.`
+		: `Generated from all ${total} included studies.`;
+}
+
+async function requireIncludedStudies(projectId: string, outputLabel: string): Promise<number> {
+	const total = await countIncluded(projectId);
+	if (total === 0) {
+		throw new OutputGenerationError(
+			`No included studies yet — run a search and screen papers before generating the ${outputLabel}.`,
+			400
+		);
+	}
+	return total;
+}
+
 // ─── Data-driven generators ────────────────────────────────────────
 
 async function generatePrismaFlow(projectId: string) {
-	const totalFound = (
-		await db
-			.select({ total: sql<number>`SUM(total_found)` })
-			.from(searchJobs)
-			.where(eq(searchJobs.projectId, projectId))
-	)[0]?.total || 0;
+	const [{ identified }] = await db
+		.select({ identified: numeric(sql`COALESCE(SUM(${searchJobs.totalFound}), 0)`) })
+		.from(searchJobs)
+		.where(eq(searchJobs.projectId, projectId));
 
-	const totalStored = (
-		await db
-			.select({ count: sql<number>`COUNT(*)` })
-			.from(papers)
-			.where(eq(papers.projectId, projectId))
-	)[0]?.count || 0;
+	const bySource = await db
+		.select({ isRelevant: papers.isRelevant, source: papers.relevanceSource, n: count() })
+		.from(papers)
+		.where(eq(papers.projectId, projectId))
+		.groupBy(papers.isRelevant, papers.relevanceSource);
 
-	const afterScreening = (
-		await db
-			.select({ count: sql<number>`COUNT(*)` })
-			.from(papers)
-			.where(and(eq(papers.projectId, projectId), eq(papers.isRelevant, true)))
-	)[0]?.count || 0;
+	const sum = (pred: (r: (typeof bySource)[number]) => boolean) =>
+		bySource.filter(pred).reduce((acc, r) => acc + r.n, 0);
 
-	const excluded = totalStored - afterScreening;
+	const stored = sum(() => true);
+	const included = sum((r) => r.isRelevant === true);
+	const excluded = sum((r) => r.isRelevant === false);
+	const notScreened = sum((r) => r.isRelevant === null);
+	const keptByDefault = sum((r) => r.isRelevant === true && r.source === 'ai_fallback');
+	const keptUnscreened = sum((r) => r.isRelevant === true && r.source === 'auto_include');
+
+	const caveats: string[] = [];
+	if (notScreened > 0) caveats.push(`${notScreened} records have not been screened yet and are not counted as excluded.`);
+	if (keptByDefault > 0) caveats.push(`${keptByDefault} included records were kept by default because the AI screening output was unusable.`);
+	if (keptUnscreened > 0) caveats.push(`${keptUnscreened} included records were kept without AI screening.`);
+	caveats.push('Records identified is the sum over all searches, so it counts records found by more than one search once per search.');
 
 	return {
-		identification: { records_from_databases: totalFound },
-		screening: { records_after_dedup: totalStored, records_excluded: excluded },
-		eligibility: { full_text_assessed: afterScreening },
-		included: { studies_included: afterScreening }
+		identification: { records_identified: identified },
+		screening: {
+			records_after_duplicates_removed: stored,
+			records_screened: included + excluded,
+			records_excluded: excluded,
+			records_awaiting_screening: notScreened
+		},
+		eligibility: { reports_assessed_for_eligibility: included },
+		included: { studies_included: included },
+		note: caveats.join(' ')
 	};
 }
 
@@ -185,30 +272,33 @@ async function generateSearchStrategyLog(projectId: string) {
 		.where(eq(searchJobs.projectId, projectId))
 		.orderBy(searchJobs.createdAt);
 
-	// Build a map of job ID → publisher/database names
+	// Publisher/database names per job, in one query
+	const pubRows = await db
+		.selectDistinct({ jobId: papers.searchJobId, publisher: journals.publisher })
+		.from(papers)
+		.innerJoin(paperJournals, eq(paperJournals.paperId, papers.id))
+		.innerJoin(journals, eq(paperJournals.journalId, journals.id))
+		.where(and(eq(papers.projectId, projectId), isNotNull(journals.publisher)));
 	const publishersByJob = new Map<string, string[]>();
-	for (const job of jobs) {
-		const pubs = await db
-			.selectDistinct({ publisher: journals.publisher })
-			.from(papers)
-			.innerJoin(paperJournals, eq(paperJournals.paperId, papers.id))
-			.innerJoin(journals, eq(paperJournals.journalId, journals.id))
-			.where(and(eq(papers.searchJobId, job.id), sql`${journals.publisher} IS NOT NULL`));
-		publishersByJob.set(job.id, pubs.map((p) => p.publisher!).filter(Boolean));
+	for (const row of pubRows) {
+		if (!row.jobId || !row.publisher) continue;
+		publishersByJob.set(row.jobId, [...(publishersByJob.get(row.jobId) ?? []), row.publisher]);
 	}
+
+	const cell = (s: string) => s.replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
 
 	let md = '# Search Strategy Log\n\n';
 	md += `**Date generated:** ${new Date().toISOString().slice(0, 10)}\n\n`;
 	md += '## Searches Conducted\n\n';
-	md += '| # | Strategy | Query | Database/Source | Date | Records Found | Relevant |\n';
-	md += '|---|----------|-------|-----------------|------|---------------|----------|\n';
+	md += '| # | Strategy | Query | Database/Source | Date range | Run on | Status | Records Found | Relevant |\n';
+	md += '|---|----------|-------|-----------------|------------|--------|--------|---------------|----------|\n';
 
 	jobs.forEach((job, i) => {
 		const pubs = publishersByJob.get(job.id) || [];
-		const source = pubs.length > 0
-			? `${pubs.join(', ')} via OpenAlex`
-			: 'OpenAlex';
-		md += `| ${i + 1} | ${job.type} | ${job.query} | ${source} | ${job.createdAt?.slice(0, 10) || '—'} | ${job.totalFound || 0} | ${job.relevantCount || 0} |\n`;
+		const source = pubs.length > 0 ? `${pubs.join(', ')} via OpenAlex` : 'OpenAlex';
+		const range = job.dateFrom || job.dateTo ? `${job.dateFrom || '…'} – ${job.dateTo || '…'}` : 'All dates';
+		const query = job.query || (job.type === 'topic' ? '(project keywords)' : '—');
+		md += `| ${i + 1} | ${job.type} | ${cell(query)} | ${cell(source)} | ${range} | ${job.createdAt?.slice(0, 10) || '—'} | ${job.status} | ${job.totalFound || 0} | ${job.relevantCount || 0} |\n`;
 	});
 
 	const totalFound = jobs.reduce((sum, j) => sum + (j.totalFound || 0), 0);
@@ -219,154 +309,176 @@ async function generateSearchStrategyLog(projectId: string) {
 	return md;
 }
 
-async function generateInclusionExclusionTable(projectId: string) {
+async function generateInclusionExclusionTable(projectId: string): Promise<TableOutput> {
 	const allPapers = await db
 		.select({
-			id: papers.id,
 			title: papers.title,
 			publicationYear: papers.publicationYear,
 			isRelevant: papers.isRelevant,
+			relevanceSource: papers.relevanceSource,
 			journalName: papers.journalName
 		})
 		.from(papers)
 		.where(eq(papers.projectId, projectId))
-		.orderBy(desc(papers.publicationYear));
+		.orderBy(desc(papers.publicationYear), asc(papers.title));
 
 	return {
-		columns: ['Title', 'Year', 'Venue', 'Decision', 'Reason'],
+		columns: [
+			{ key: 'title', label: 'Title' },
+			{ key: 'year', label: 'Year' },
+			{ key: 'venue', label: 'Venue' },
+			{ key: 'decision', label: 'Decision' },
+			{ key: 'decidedBy', label: 'Decided by' },
+			{ key: 'reason', label: 'Reason' }
+		],
 		rows: allPapers.map((p) => ({
 			title: p.title,
 			year: p.publicationYear,
-			venue: p.journalName || '—',
-			decision: p.isRelevant ? 'Included' : 'Excluded',
-			reason: p.isRelevant ? 'Meets relevance criteria' : 'Does not meet relevance criteria'
+			venue: p.journalName,
+			decision: SCREENING_DECISION_LABELS[screeningDecision(p.isRelevant)],
+			decidedBy: p.isRelevant === null ? null : screeningSourceLabel(p.relevanceSource),
+			reason: screeningReason(p.isRelevant, p.relevanceSource)
 		}))
 	};
 }
 
-async function generateDataExtractionMatrix(projectId: string) {
+async function generateDataExtractionMatrix(projectId: string): Promise<TableOutput> {
 	const relevant = await db
 		.select()
 		.from(papers)
-		.where(and(eq(papers.projectId, projectId), eq(papers.isRelevant, true)))
-		.orderBy(desc(papers.publicationYear));
+		.where(includedIn(projectId))
+		.orderBy(desc(papers.publicationYear), asc(papers.title));
 
-	const rows = await Promise.all(
-		relevant.map(async (p) => {
-			const authorList = await db
-				.select({ name: authors.name })
-				.from(paperAuthors)
-				.innerJoin(authors, eq(paperAuthors.authorId, authors.id))
-				.where(eq(paperAuthors.paperId, p.id))
-				.orderBy(paperAuthors.position);
-
-			return {
-				title: p.title,
-				authors: authorList.map((a) => a.name).join('; '),
-				year: p.publicationYear,
-				venue: p.journalName || '—',
-				methodology: p.methodologySummary || '—',
-				population: p.targetPopulation || '—',
-				region: p.focusedRegion || '—',
-				platform: p.platformDomain || '—',
-				summary: p.summary || '—'
-			};
-		})
-	);
+	const relations = await loadPaperRelations(relevant.map((p) => p.id), { authors: true });
 
 	return {
-		columns: ['Title', 'Authors', 'Year', 'Venue', 'Methodology', 'Population', 'Region', 'Platform', 'Summary'],
-		rows
+		columns: [
+			{ key: 'title', label: 'Title' },
+			{ key: 'authors', label: 'Authors' },
+			{ key: 'year', label: 'Year' },
+			{ key: 'venue', label: 'Venue' },
+			{ key: 'methodology', label: 'Methodology' },
+			{ key: 'population', label: 'Population' },
+			{ key: 'region', label: 'Region' },
+			{ key: 'platform', label: 'Platform' },
+			{ key: 'summary', label: 'Summary' }
+		],
+		rows: relevant.map((p) => ({
+			title: p.title,
+			authors: (relations.authors.get(p.id) ?? []).map((a) => a.name).join('; '),
+			year: p.publicationYear,
+			venue: p.journalName,
+			methodology: p.methodologySummary,
+			population: p.targetPopulation,
+			region: p.focusedRegion,
+			platform: p.platformDomain,
+			summary: p.summary
+		}))
 	};
 }
 
-async function generateSystematicMapTable(projectId: string) {
+async function generateSystematicMapTable(projectId: string): Promise<TableOutput> {
 	const relevant = await db
 		.select({ id: papers.id, title: papers.title, publicationYear: papers.publicationYear })
 		.from(papers)
-		.where(and(eq(papers.projectId, projectId), eq(papers.isRelevant, true)));
+		.where(includedIn(projectId))
+		.orderBy(desc(papers.publicationYear), asc(papers.title));
 
-	const rows = await Promise.all(
-		relevant.map(async (p) => {
-			const tags = await db
-				.select({ dimension: analysisTags.dimension, value: analysisTags.value })
-				.from(analysisTags)
-				.where(eq(analysisTags.paperId, p.id));
+	const dimensions = await db
+		.select({ name: projectDimensions.name, label: projectDimensions.label })
+		.from(projectDimensions)
+		.where(eq(projectDimensions.projectId, projectId))
+		.orderBy(projectDimensions.position);
 
-			const tagMap: Record<string, string> = {};
-			for (const t of tags) tagMap[t.dimension] = t.value;
+	const relations = await loadPaperRelations(relevant.map((p) => p.id), { tags: true });
 
-			return { title: p.title, year: p.publicationYear, ...tagMap };
-		})
-	);
-
-	// Collect all dimension names as columns
-	const dimensionSet = new Set<string>();
-	rows.forEach((r) => Object.keys(r).forEach((k) => { if (k !== 'title' && k !== 'year') dimensionSet.add(k); }));
+	// Project dimensions first (in their configured order), then any tags from removed dimensions.
+	const columns: TableColumn[] = dimensions.map((d) => ({ key: `tag:${d.name}`, label: d.label }));
+	const known = new Set(dimensions.map((d) => d.name));
+	for (const tags of relations.tags.values()) {
+		for (const name of Object.keys(tags)) {
+			if (!known.has(name)) {
+				known.add(name);
+				columns.push({ key: `tag:${name}`, label: name });
+			}
+		}
+	}
 
 	return {
-		columns: ['Title', 'Year', ...Array.from(dimensionSet)],
-		rows
+		columns: [{ key: 'title', label: 'Title' }, { key: 'year', label: 'Year' }, ...columns],
+		rows: relevant.map((p) => {
+			const row: Record<string, unknown> = { title: p.title, year: p.publicationYear };
+			for (const [name, value] of Object.entries(relations.tags.get(p.id) ?? {})) row[`tag:${name}`] = value;
+			return row;
+		})
 	};
 }
 
-async function generateStudyCharacteristicsTable(projectId: string) {
+async function generateStudyCharacteristicsTable(projectId: string): Promise<TableOutput> {
 	const relevant = await db
 		.select()
 		.from(papers)
-		.where(and(eq(papers.projectId, projectId), eq(papers.isRelevant, true)))
-		.orderBy(desc(papers.publicationYear));
+		.where(includedIn(projectId))
+		.orderBy(desc(papers.publicationYear), asc(papers.title));
 
 	return {
-		columns: ['Title', 'Year', 'Methodology', 'Population', 'Region', 'Platform/Domain'],
+		columns: [
+			{ key: 'title', label: 'Title' },
+			{ key: 'year', label: 'Year' },
+			{ key: 'methodology', label: 'Methodology' },
+			{ key: 'population', label: 'Population' },
+			{ key: 'region', label: 'Region' },
+			{ key: 'platform', label: 'Platform/Domain' }
+		],
 		rows: relevant.map((p) => ({
 			title: p.title,
 			year: p.publicationYear,
-			methodology: p.methodologySummary || '—',
-			population: p.targetPopulation || '—',
-			region: p.focusedRegion || '—',
-			platform: p.platformDomain || '—'
+			methodology: p.methodologySummary,
+			population: p.targetPopulation,
+			region: p.focusedRegion,
+			platform: p.platformDomain
 		}))
 	};
 }
 
 async function generateBibliometricAnalysis(projectId: string) {
 	const byYear = await db
-		.select({ year: papers.publicationYear, count: sql<number>`COUNT(*)` })
+		.select({ year: papers.publicationYear, count: count() })
 		.from(papers)
-		.where(and(eq(papers.projectId, projectId), eq(papers.isRelevant, true)))
+		.where(includedIn(projectId))
 		.groupBy(papers.publicationYear)
 		.orderBy(papers.publicationYear);
 
 	const byVenue = await db
-		.select({ venue: papers.journalName, count: sql<number>`COUNT(*)` })
+		.select({ venue: papers.journalName, count: count() })
 		.from(papers)
-		.where(and(eq(papers.projectId, projectId), eq(papers.isRelevant, true)))
+		.where(includedIn(projectId))
 		.groupBy(papers.journalName)
-		.orderBy(desc(sql`COUNT(*)`))
+		.orderBy(desc(count()))
 		.limit(15);
 
 	const topAuthors = await db
-		.select({ name: authors.name, count: sql<number>`COUNT(DISTINCT ${papers.id})` })
+		.select({ name: authors.name, count: countDistinct(papers.id) })
 		.from(paperAuthors)
 		.innerJoin(authors, eq(paperAuthors.authorId, authors.id))
 		.innerJoin(papers, eq(paperAuthors.paperId, papers.id))
-		.where(and(eq(papers.projectId, projectId), eq(papers.isRelevant, true)))
+		.where(includedIn(projectId))
 		.groupBy(authors.id)
-		.orderBy(desc(sql`COUNT(DISTINCT ${papers.id})`))
+		.orderBy(desc(countDistinct(papers.id)))
 		.limit(15);
 
 	const topKeywords = await db
-		.select({ term: keywords.term, count: sql<number>`COUNT(*)` })
+		.select({ term: keywords.term, count: count() })
 		.from(paperKeywords)
 		.innerJoin(keywords, eq(paperKeywords.keywordId, keywords.id))
 		.innerJoin(papers, eq(papers.id, paperKeywords.paperId))
-		.where(and(eq(papers.projectId, projectId), eq(papers.isRelevant, true)))
+		.where(includedIn(projectId))
 		.groupBy(keywords.term)
-		.orderBy(desc(sql`COUNT(*)`))
+		.orderBy(desc(count()))
 		.limit(20);
 
 	const data = { byYear, byVenue, topAuthors, topKeywords };
+	const cell = (s: string) => s.replace(/\|/g, '\\|');
 
 	// Generate markdown tables for human-readable rendering
 	let md = '# Bibliometric Analysis\n\n';
@@ -377,31 +489,46 @@ async function generateBibliometricAnalysis(projectId: string) {
 
 	md += '\n## Top Venues\n\n';
 	md += '| Venue | Papers |\n|-------|--------|\n';
-	for (const row of byVenue) md += `| ${row.venue || '(unknown)'} | ${row.count} |\n`;
+	for (const row of byVenue) md += `| ${cell(row.venue || '(unknown)')} | ${row.count} |\n`;
 
 	md += '\n## Top Authors\n\n';
 	md += '| Author | Papers |\n|--------|--------|\n';
-	for (const row of topAuthors) md += `| ${row.name} | ${row.count} |\n`;
+	for (const row of topAuthors) md += `| ${cell(row.name)} | ${row.count} |\n`;
 
 	md += '\n## Top Keywords\n\n';
 	md += '| Keyword | Occurrences |\n|---------|-------------|\n';
-	for (const row of topKeywords) md += `| ${row.term} | ${row.count} |\n`;
+	for (const row of topKeywords) md += `| ${cell(row.term)} | ${row.count} |\n`;
 
 	return { json: data, markdown: md };
 }
 
 // ─── LLM-synthesized generators ────────────────────────────────────
 
-async function getRelevantPaperSummaries(projectId: string, limit = 50): Promise<string> {
+interface StudySample {
+	text: string;
+	used: number;
+	total: number;
+	note: string;
+}
+
+/** The most-cited included studies (up to `limit`), formatted as a numbered list for prompts. */
+async function getStudySample(projectId: string, outputLabel: string, limit = 50): Promise<StudySample> {
+	const total = await requireIncludedStudies(projectId, outputLabel);
 	const relevant = await db
 		.select({ title: papers.title, summary: papers.summary, abstract: papers.abstract, publicationYear: papers.publicationYear })
 		.from(papers)
-		.where(and(eq(papers.projectId, projectId), eq(papers.isRelevant, true)))
+		.where(includedIn(projectId))
+		.orderBy(...studyOrder)
 		.limit(limit);
 
-	return relevant
-		.map((p, i) => `[${i + 1}] "${p.title}" (${p.publicationYear || '?'})\n${p.summary || p.abstract?.slice(0, 300) || 'No summary'}`)
-		.join('\n\n');
+	return {
+		text: relevant
+			.map((p, i) => `[${i + 1}] "${p.title}" (${p.publicationYear || '?'})\n${p.summary || p.abstract?.slice(0, 300) || 'No summary'}`)
+			.join('\n\n'),
+		used: relevant.length,
+		total,
+		note: sampleNote(relevant.length, total)
+	};
 }
 
 async function llmGenerate(prompt: string): Promise<string> {
@@ -409,17 +536,34 @@ async function llmGenerate(prompt: string): Promise<string> {
 	return text.trim();
 }
 
+/** Prepends the sample disclosure to an LLM-written markdown output. */
+function withNote(note: string, markdown: string): string {
+	return `> ${note}\n\n${markdown}`;
+}
+
+/** Structured LLM call for review outputs: malformed output becomes a user-facing error. */
+async function generateReviewData<T>(schema: z.ZodType<T>, prompt: string, outputLabel: string): Promise<T> {
+	try {
+		return await generateStructured(schema, prompt);
+	} catch (err) {
+		if (err instanceof MalformedLlmOutputError) {
+			throw new OutputGenerationError(`The model returned an unusable ${outputLabel}. Please try again.`, 502);
+		}
+		throw err;
+	}
+}
+
 async function generateNarrativeSummary(projectId: string): Promise<string> {
 	const ctx = await loadPromptContext(projectId);
-	const paperSummaries = await getRelevantPaperSummaries(projectId);
+	const sample = await getStudySample(projectId, 'narrative summary');
 
-	return llmGenerate(`You are writing the narrative synthesis section of a systematic literature review on "${ctx.projectName}".
+	return withNote(sample.note, await llmGenerate(`You are writing the narrative synthesis section of a systematic literature review on "${ctx.projectName}".
 
 Context: ${ctx.projectDescription}
 
-Below are summaries of ${paperSummaries.split('\n\n').length} included studies:
+Below are summaries of ${sample.used} included studies:
 
-${paperSummaries}
+${sample.text}
 
 Write a comprehensive narrative synthesis (800-1200 words) that:
 1. Organizes findings by major themes
@@ -428,16 +572,16 @@ Write a comprehensive narrative synthesis (800-1200 words) that:
 4. Notes geographic and temporal patterns
 5. Identifies limitations in the current evidence base
 
-Write in academic prose suitable for publication. Use markdown formatting.`);
+Base every statement on the studies above and cite them by number, e.g. [3]. Write in academic prose suitable for publication. Use markdown formatting.`));
 }
 
 async function generateThematicSynthesis(projectId: string): Promise<string> {
 	const ctx = await loadPromptContext(projectId);
-	const paperSummaries = await getRelevantPaperSummaries(projectId);
+	const sample = await getStudySample(projectId, 'thematic synthesis');
 
-	return llmGenerate(`You are conducting a thematic synthesis of research on "${ctx.projectName}".
+	return withNote(sample.note, await llmGenerate(`You are conducting a thematic synthesis of research on "${ctx.projectName}".
 
-${paperSummaries}
+${sample.text}
 
 Perform a three-stage thematic synthesis:
 1. **Line-by-line coding**: Identify key concepts from each study
@@ -447,7 +591,7 @@ Perform a three-stage thematic synthesis:
 Present as a structured markdown document with:
 - A list of identified themes (with brief descriptions)
 - For each theme: which studies support it (reference by number)
-- A final section on cross-cutting patterns and relationships between themes`);
+- A final section on cross-cutting patterns and relationships between themes`));
 }
 
 async function generateProtocolDocument(projectId: string): Promise<string> {
@@ -476,34 +620,49 @@ Write in formal academic style suitable for protocol registration.`);
 }
 
 async function generateAnnotatedBibliography(projectId: string): Promise<string> {
+	const total = await requireIncludedStudies(projectId, 'annotated bibliography');
 	const relevant = await db
-		.select({ title: papers.title, doi: papers.doi, publicationYear: papers.publicationYear, summary: papers.summary, abstract: papers.abstract })
+		.select({
+			id: papers.id,
+			title: papers.title,
+			doi: papers.doi,
+			publicationYear: papers.publicationYear,
+			journalName: papers.journalName,
+			summary: papers.summary,
+			abstract: papers.abstract
+		})
 		.from(papers)
-		.where(and(eq(papers.projectId, projectId), eq(papers.isRelevant, true)))
-		.orderBy(papers.publicationYear)
+		.where(includedIn(projectId))
+		.orderBy(...studyOrder)
 		.limit(50);
 
-	const entries = relevant.map((p, i) =>
-		`[${i + 1}] "${p.title}" (${p.publicationYear || '?'})${p.doi ? ` DOI: ${p.doi}` : ''}\nContent: ${p.summary || p.abstract?.slice(0, 400) || 'No summary'}`
-	).join('\n\n');
+	const relations = await loadPaperRelations(relevant.map((p) => p.id), { authors: true });
 
-	return llmGenerate(`Generate an annotated bibliography for these ${relevant.length} papers. For each entry, write:
-1. A standard citation line
+	// Pass the real bibliographic data so the model formats citations instead of inventing them.
+	const entries = relevant
+		.map((p, i) => {
+			const authorNames = (relations.authors.get(p.id) ?? []).map((a) => a.name).join(', ') || 'Unknown authors';
+			return `[${i + 1}] Authors: ${authorNames}\nTitle: "${p.title}"\nYear: ${p.publicationYear || 'n.d.'}\nVenue: ${p.journalName || 'Unknown venue'}${p.doi ? `\nDOI: ${p.doi}` : ''}\nContent: ${p.summary || p.abstract?.slice(0, 400) || 'No summary'}`;
+		})
+		.join('\n\n');
+
+	return withNote(sampleNote(relevant.length, total), await llmGenerate(`Generate an annotated bibliography for these ${relevant.length} papers. For each entry, write:
+1. A citation line built ONLY from the authors, title, year, venue and DOI given — do not add or guess any details
 2. A 2-3 sentence annotation: what the study does, its methodology, and its key findings
 
 Papers:
 ${entries}
 
-Format as a numbered markdown list. Each entry should have the citation in bold followed by the annotation paragraph.`);
+Format as a numbered markdown list. Each entry should have the citation in bold followed by the annotation paragraph.`));
 }
 
 async function generateGapMap(projectId: string): Promise<string> {
 	const ctx = await loadPromptContext(projectId);
-	const paperSummaries = await getRelevantPaperSummaries(projectId, 30);
+	const sample = await getStudySample(projectId, 'research gap map', 30);
 
-	return llmGenerate(`You are creating a research gap map for a systematic review on "${ctx.projectName}".
+	return withNote(sample.note, await llmGenerate(`You are creating a research gap map for a systematic review on "${ctx.projectName}".
 
-${paperSummaries}
+${sample.text}
 
 Create a structured research gap map in markdown that identifies:
 1. **Well-covered areas** — topics with strong evidence (many studies)
@@ -513,103 +672,173 @@ Create a structured research gap map in markdown that identifies:
 5. **Temporal gaps** — time periods with insufficient coverage
 6. **Population gaps** — under-studied groups
 
-Present as a structured markdown document with clear headings and bullet points. For each gap, suggest a potential research question to address it.`);
+Present as a structured markdown document with clear headings and bullet points. For each gap, suggest a potential research question to address it.`));
 }
 
-async function generateQualityAppraisalTable(projectId: string) {
-	const ctx = await loadPromptContext(projectId);
+/** Loads the sample for per-study LLM tables (quality, risk of bias). */
+async function getAppraisalSample(projectId: string, outputLabel: string, limit = 30) {
+	const total = await requireIncludedStudies(projectId, outputLabel);
 	const relevant = await db
 		.select({ id: papers.id, title: papers.title, methodologySummary: papers.methodologySummary })
 		.from(papers)
-		.where(and(eq(papers.projectId, projectId), eq(papers.isRelevant, true)))
-		.limit(30);
+		.where(includedIn(projectId))
+		.orderBy(...studyOrder)
+		.limit(limit);
+	const list = relevant
+		.map((p, i) => `[${i + 1}] "${p.title}"\nMethodology: ${p.methodologySummary || 'Not specified'}`)
+		.join('\n\n');
+	return { relevant, list, note: sampleNote(relevant.length, total) };
+}
 
-	const paperList = relevant.map((p, i) =>
-		`[${i + 1}] "${p.title}"\nMethodology: ${p.methodologySummary || 'Not specified'}`
-	).join('\n\n');
+/**
+ * Matches per-study assessments back to papers by the 1-based index the model
+ * was given (never by array position, which shifts if the model skips or
+ * reorders a study). Studies without an assessment get an empty row.
+ */
+export function rowsByStudyIndex<A extends { index: number }>(
+	studies: { title: string }[],
+	assessments: A[],
+	toRow: (assessment: A) => Record<string, unknown>,
+	missingRow: Record<string, unknown>
+): Record<string, unknown>[] {
+	const byIndex = new Map<number, A>();
+	for (const a of assessments) {
+		if (a.index >= 1 && a.index <= studies.length && !byIndex.has(a.index)) byIndex.set(a.index, a);
+	}
+	return studies.map((study, i) => {
+		const assessment = byIndex.get(i + 1);
+		return { title: study.title, ...(assessment ? toRow(assessment) : missingRow) };
+	});
+}
 
-	const response = await llmGenerate(`You are appraising the quality of studies in a review on "${ctx.projectName}".
+const QUALITY_CRITERIA = [
+	{ key: 'objectives', label: 'Objectives', description: 'Clear research objectives' },
+	{ key: 'methodology', label: 'Methodology', description: 'Appropriate methodology' },
+	{ key: 'sample', label: 'Sample', description: 'Adequate sample/data' },
+	{ key: 'analysis', label: 'Analysis', description: 'Valid analysis' },
+	{ key: 'reporting', label: 'Reporting', description: 'Clear reporting of results' }
+] as const;
 
-${paperList}
+const qualitySchema = z.object({
+	assessments: z.array(
+		z.object({
+			index: z.number().int(),
+			objectives: z.number().int(),
+			methodology: z.number().int(),
+			sample: z.number().int(),
+			analysis: z.number().int(),
+			reporting: z.number().int(),
+			quality: z.enum(['high', 'medium', 'low'])
+		})
+	)
+});
+
+async function generateQualityAppraisalTable(projectId: string): Promise<TableOutput> {
+	const ctx = await loadPromptContext(projectId);
+	const { relevant, list, note } = await getAppraisalSample(projectId, 'quality appraisal');
+
+	const { assessments } = await generateReviewData(
+		qualitySchema,
+		`You are appraising the quality of studies in a review on "${ctx.projectName}".
+
+${list}
 
 For each study, assess quality on these criteria (score 0-2: 0=not met, 1=partially met, 2=fully met):
-1. Clear research objectives
-2. Appropriate methodology
-3. Adequate sample/data
-4. Valid analysis
-5. Clear reporting of results
+${QUALITY_CRITERIA.map((c, i) => `${i + 1}. "${c.key}": ${c.description}`).join('\n')}
 
-Respond with a JSON array where each object has: "index" (1-based), "title", "scores" (object with criteria names as keys and 0/1/2 as values), "totalScore", "quality" ("high"/"medium"/"low").
+Respond with a JSON object {"assessments": [...]} with one entry per study containing: "index" (the study's number in brackets), the five criteria keys above with their scores, and "quality" ("high"/"medium"/"low").`,
+		'quality appraisal'
+	);
 
-Respond ONLY with valid JSON array.`);
+	const clampScore = (n: number) => Math.min(2, Math.max(0, n));
 
-	const cleaned = response.replace(/^```json?\s*/, '').replace(/```\s*$/, '');
-	try {
-		const rows = JSON.parse(cleaned);
-		return {
-			columns: ['Title', 'Objectives', 'Methodology', 'Sample', 'Analysis', 'Reporting', 'Total', 'Quality'],
-			rows: rows.map((r: any, i: number) => ({
-				title: relevant[i]?.title || r.title,
-				...r.scores,
-				totalScore: r.totalScore,
-				quality: r.quality
-			}))
-		};
-	} catch {
-		return { columns: ['Error'], rows: [{ error: 'Failed to parse quality appraisal' }] };
-	}
+	return {
+		columns: [
+			{ key: 'title', label: 'Title' },
+			...QUALITY_CRITERIA.map(({ key, label }) => ({ key, label })),
+			{ key: 'totalScore', label: 'Total (0-10)' },
+			{ key: 'quality', label: 'Quality' }
+		],
+		rows: rowsByStudyIndex(
+			relevant,
+			assessments,
+			(a) => {
+				const scores = Object.fromEntries(QUALITY_CRITERIA.map(({ key }) => [key, clampScore(a[key])]));
+				const totalScore = Object.values(scores).reduce((sum, s) => sum + s, 0);
+				return { ...scores, totalScore, quality: a.quality };
+			},
+			{ quality: 'Not assessed' }
+		),
+		note
+	};
 }
 
-async function generateRiskOfBiasTable(projectId: string) {
+const BIAS_DOMAINS = [
+	{ key: 'selection', label: 'Selection' },
+	{ key: 'performance', label: 'Performance' },
+	{ key: 'detection', label: 'Detection' },
+	{ key: 'attrition', label: 'Attrition' },
+	{ key: 'reporting', label: 'Reporting' }
+] as const;
+
+const judgment = z.enum(['low', 'high', 'unclear']);
+
+const riskOfBiasSchema = z.object({
+	assessments: z.array(
+		z.object({
+			index: z.number().int(),
+			selection: judgment,
+			performance: judgment,
+			detection: judgment,
+			attrition: judgment,
+			reporting: judgment,
+			overall: judgment
+		})
+	)
+});
+
+async function generateRiskOfBiasTable(projectId: string): Promise<TableOutput> {
 	const ctx = await loadPromptContext(projectId);
-	const relevant = await db
-		.select({ id: papers.id, title: papers.title, methodologySummary: papers.methodologySummary })
-		.from(papers)
-		.where(and(eq(papers.projectId, projectId), eq(papers.isRelevant, true)))
-		.limit(30);
+	const { relevant, list, note } = await getAppraisalSample(projectId, 'risk of bias assessment');
 
-	const paperList = relevant.map((p, i) =>
-		`[${i + 1}] "${p.title}"\nMethodology: ${p.methodologySummary || 'Not specified'}`
-	).join('\n\n');
+	const { assessments } = await generateReviewData(
+		riskOfBiasSchema,
+		`Assess risk of bias for these studies in a review on "${ctx.projectName}".
 
-	const response = await llmGenerate(`Assess risk of bias for these studies in a review on "${ctx.projectName}".
+${list}
 
-${paperList}
+For each study, rate bias risk as "low", "high", or "unclear" in these domains: ${BIAS_DOMAINS.map((d) => `"${d.key}"`).join(', ')}, plus an "overall" judgment.
 
-For each study, assess bias risk across these domains (rate as "low", "high", or "unclear"):
-1. Selection bias
-2. Performance bias
-3. Detection bias
-4. Attrition bias
-5. Reporting bias
+Respond with a JSON object {"assessments": [...]} with one entry per study containing: "index" (the study's number in brackets), the five domain keys, and "overall".`,
+		'risk of bias assessment'
+	);
 
-Respond with a JSON array where each object has: "index", "title", "biases" (object with domain names as keys), "overall" ("low"/"high"/"unclear").
-
-Respond ONLY with valid JSON array.`);
-
-	const cleaned = response.replace(/^```json?\s*/, '').replace(/```\s*$/, '');
-	try {
-		const rows = JSON.parse(cleaned);
-		return {
-			columns: ['Title', 'Selection', 'Performance', 'Detection', 'Attrition', 'Reporting', 'Overall'],
-			rows: rows.map((r: any, i: number) => ({
-				title: relevant[i]?.title || r.title,
-				...r.biases,
-				overall: r.overall
-			}))
-		};
-	} catch {
-		return { columns: ['Error'], rows: [{ error: 'Failed to parse risk of bias assessment' }] };
-	}
+	return {
+		columns: [
+			{ key: 'title', label: 'Title' },
+			...BIAS_DOMAINS.map(({ key, label }) => ({ key, label })),
+			{ key: 'overall', label: 'Overall' }
+		],
+		rows: rowsByStudyIndex(
+			relevant,
+			assessments,
+			(a) => ({
+				...Object.fromEntries(BIAS_DOMAINS.map(({ key }) => [key, a[key]])),
+				overall: a.overall
+			}),
+			{ overall: 'Not assessed' }
+		),
+		note
+	};
 }
 
 async function generateConceptualFramework(projectId: string): Promise<string> {
 	const ctx = await loadPromptContext(projectId);
-	const paperSummaries = await getRelevantPaperSummaries(projectId, 30);
+	const sample = await getStudySample(projectId, 'conceptual framework', 30);
 
-	return llmGenerate(`Based on these studies in "${ctx.projectName}", develop a conceptual framework.
+	return withNote(sample.note, await llmGenerate(`Based on these studies in "${ctx.projectName}", develop a conceptual framework.
 
-${paperSummaries}
+${sample.text}
 
 Create a markdown document that:
 1. Identifies the **key concepts** that emerge from the literature
@@ -618,16 +847,16 @@ Create a markdown document that:
 4. Explains how this framework synthesizes the existing evidence
 5. Identifies where the framework has gaps or weak connections
 
-Write in academic prose. Use markdown headings and bullet points for clarity.`);
+Write in academic prose. Use markdown headings and bullet points for clarity.`));
 }
 
 async function generateSummaryOfFindings(projectId: string): Promise<string> {
 	const ctx = await loadPromptContext(projectId);
-	const paperSummaries = await getRelevantPaperSummaries(projectId, 40);
+	const sample = await getStudySample(projectId, 'summary of findings', 40);
 
-	return llmGenerate(`Create a Summary of Findings for a systematic review on "${ctx.projectName}".
+	return withNote(sample.note, await llmGenerate(`Create a Summary of Findings for a systematic review on "${ctx.projectName}".
 
-${paperSummaries}
+${sample.text}
 
 Generate a structured Summary of Findings in markdown that includes:
 1. **Key findings** — 5-8 major findings organized by theme
@@ -636,55 +865,107 @@ Generate a structured Summary of Findings in markdown that includes:
 4. **Research implications** — what questions remain unanswered
 5. **Limitations** — caveats and limitations of the reviewed evidence
 
-Write in clear, concise academic prose.`);
+Cite supporting studies by number, e.g. [3]. Write in clear, concise academic prose.`));
 }
 
-async function generateGradeEvidenceTable(projectId: string) {
+const gradeSchema = z.object({
+	outcomes: z.array(
+		z.object({
+			outcome: z.string(),
+			studies: z.number().int(),
+			certainty: z.enum(['High', 'Moderate', 'Low', 'Very Low']),
+			rationale: z.string()
+		})
+	)
+});
+
+async function generateGradeEvidenceTable(projectId: string): Promise<TableOutput> {
 	const ctx = await loadPromptContext(projectId);
-	const paperSummaries = await getRelevantPaperSummaries(projectId, 30);
+	const sample = await getStudySample(projectId, 'GRADE evidence table', 30);
 
-	const response = await llmGenerate(`Apply the GRADE framework to rate evidence certainty for a review on "${ctx.projectName}".
+	const { outcomes } = await generateReviewData(
+		gradeSchema,
+		`Apply the GRADE framework to rate evidence certainty for a review on "${ctx.projectName}".
 
-${paperSummaries}
+${sample.text}
 
 Identify 3-6 key outcomes/findings from these studies. For each outcome, rate the certainty of evidence using GRADE:
 - Start at "High" for RCTs, "Low" for observational
 - Downgrade for: risk of bias, inconsistency, indirectness, imprecision, publication bias
 - Upgrade for: large effect, dose-response, confounders would reduce effect
 
-Respond with a JSON array where each object has: "outcome", "studies" (number), "certainty" ("High"/"Moderate"/"Low"/"Very Low"), "rationale".
+Respond with a JSON object {"outcomes": [...]} where each entry has: "outcome", "studies" (number of the studies above that report it), "certainty" ("High"/"Moderate"/"Low"/"Very Low"), "rationale".`,
+		'GRADE evidence table'
+	);
 
-Respond ONLY with valid JSON array.`);
-
-	const cleaned = response.replace(/^```json?\s*/, '').replace(/```\s*$/, '');
-	try {
-		return { columns: ['Outcome', 'Studies', 'Certainty', 'Rationale'], rows: JSON.parse(cleaned) };
-	} catch {
-		return { columns: ['Error'], rows: [{ error: 'Failed to parse GRADE evidence table' }] };
-	}
+	return {
+		columns: [
+			{ key: 'outcome', label: 'Outcome' },
+			{ key: 'studies', label: 'Studies' },
+			{ key: 'certainty', label: 'Certainty' },
+			{ key: 'rationale', label: 'Rationale' }
+		],
+		rows: outcomes,
+		note: sample.note
+	};
 }
+
+const codingFrameworkSchema = z.object({
+	categories: z.array(
+		z.object({
+			name: z.string(),
+			description: z.string(),
+			codes: z.array(
+				z.object({
+					name: z.string(),
+					description: z.string(),
+					studyIndices: z.array(z.number().int())
+				})
+			)
+		})
+	)
+});
 
 async function generateCodingFramework(projectId: string) {
 	const ctx = await loadPromptContext(projectId);
-	const paperSummaries = await getRelevantPaperSummaries(projectId, 30);
+	const total = await requireIncludedStudies(projectId, 'coding framework');
+	const studies = await db
+		.select({ title: papers.title, summary: papers.summary, abstract: papers.abstract, publicationYear: papers.publicationYear })
+		.from(papers)
+		.where(includedIn(projectId))
+		.orderBy(...studyOrder)
+		.limit(30);
+	const list = studies
+		.map((p, i) => `[${i + 1}] "${p.title}" (${p.publicationYear || '?'})\n${p.summary || p.abstract?.slice(0, 300) || 'No summary'}`)
+		.join('\n\n');
 
-	const response = await llmGenerate(`Develop a coding framework/taxonomy for a review on "${ctx.projectName}".
+	const { categories } = await generateReviewData(
+		codingFrameworkSchema,
+		`Develop a coding framework/taxonomy for a review on "${ctx.projectName}".
 
-${paperSummaries}
+${list}
 
 Create a hierarchical coding framework by:
 1. Identifying top-level categories (4-8)
 2. Breaking each into sub-codes (2-5 per category)
-3. For each code, listing which studies (by number) it applies to
+3. For each code, listing which studies (by their number in brackets) it applies to
 
-Respond with a JSON object: { "categories": [{ "name", "description", "codes": [{ "name", "description", "studyIndices": [1,3,5] }] }] }
+Respond with a JSON object: { "categories": [{ "name", "description", "codes": [{ "name", "description", "studyIndices": [1, 3, 5] }] }] }`,
+		'coding framework'
+	);
 
-Respond ONLY with valid JSON.`);
-
-	const cleaned = response.replace(/^```json?\s*/, '').replace(/```\s*$/, '');
-	try {
-		return JSON.parse(cleaned);
-	} catch {
-		return { categories: [{ name: 'Error', description: 'Failed to parse coding framework', codes: [] }] };
-	}
+	// Store study titles rather than prompt-local numbers, which mean nothing to readers.
+	const titleOf = (n: number) => studies[n - 1]?.title;
+	return {
+		categories: categories.map((c) => ({
+			name: c.name,
+			description: c.description,
+			codes: c.codes.map((code) => ({
+				name: code.name,
+				description: code.description,
+				studies: [...new Set(code.studyIndices)].map(titleOf).filter(Boolean)
+			}))
+		})),
+		note: sampleNote(studies.length, total)
+	};
 }

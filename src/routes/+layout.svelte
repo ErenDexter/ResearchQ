@@ -2,6 +2,7 @@
 	import './layout.css';
 	import { page } from '$app/stores';
 	import { onMount } from 'svelte';
+	import { setProjectId, takeLegacyProjectId } from '$lib/current-project';
 	import {
 		LayoutDashboard,
 		Search,
@@ -19,16 +20,10 @@
 		BookMarked
 	} from 'lucide-svelte';
 
-	let { children } = $props();
+	let { children, data } = $props();
 
-	interface Project {
-		id: string;
-		name: string;
-		paperCount: number;
-	}
-
-	let projects: Project[] = $state([]);
-	let currentProjectId = $state('');
+	let projects = $derived(data.projects ?? []);
+	let currentProjectId = $derived(data.currentProjectId ?? '');
 	let currentProjectName = $derived(
 		projects.find((p) => p.id === currentProjectId)?.name || 'Select Project'
 	);
@@ -49,35 +44,20 @@
 		{ href: '/projects', label: 'Projects', icon: FolderOpen }
 	];
 
-	onMount(async () => {
-		// Load saved project from localStorage
-		const saved = localStorage.getItem('currentProjectId');
-
-		const res = await fetch('/api/projects');
-		const data = await res.json();
-		projects = data.projects || [];
-
-		if (saved && projects.some((p: Project) => p.id === saved)) {
-			currentProjectId = saved;
-		} else if (projects.length > 0) {
-			currentProjectId = projects[0].id;
+	onMount(() => {
+		// Carry over a selection saved by older versions (localStorage only).
+		const legacy = takeLegacyProjectId();
+		if (legacy && legacy !== currentProjectId && projects.some((p) => p.id === legacy)) {
+			selectProject(legacy);
 		}
 	});
 
 	function selectProject(id: string) {
-		currentProjectId = id;
-		localStorage.setItem('currentProjectId', id);
+		setProjectId(id);
 		showProjectDropdown = false;
-		// Reload current page data with new project context
+		// Reload so every page refetches with the new project context
 		window.location.reload();
 	}
-
-	// Make projectId globally accessible
-	$effect(() => {
-		if (typeof window !== 'undefined' && currentProjectId) {
-			(window as any).__currentProjectId = currentProjectId;
-		}
-	});
 </script>
 
 <svelte:head>

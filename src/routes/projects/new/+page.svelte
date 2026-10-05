@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
+	import { setProjectId } from '$lib/current-project';
 	import Button from '$lib/components/ui/Button.svelte';
 	import Input from '$lib/components/ui/Input.svelte';
 	import Textarea from '$lib/components/ui/Textarea.svelte';
@@ -38,6 +39,7 @@
 		}
 		error = '';
 		step = 2;
+		let createdId = '';
 
 		try {
 			// Step 1: Create the project
@@ -52,21 +54,26 @@
 				throw new Error(createData.error || 'Failed to create project');
 			}
 
-			projectId = createData.project.id;
+			createdId = createData.project.id;
 
 			// Step 2: Run LLM setup wizard
-			const setupRes = await fetch(`/api/projects/${projectId}/setup`, {
+			const setupRes = await fetch(`/api/projects/${createdId}/setup`, {
 				method: 'POST'
 			});
-			const setupData = await setupRes.json();
+			const setupData = await setupRes.json().catch(() => ({}));
 
 			if (!setupRes.ok) {
 				throw new Error(setupData.error || 'Setup wizard failed');
 			}
 
+			projectId = createdId;
 			setupResult = setupData.setup;
 			step = 3;
 		} catch (e) {
+			// Don't leave an empty, keyword-less project behind — submitting again creates a fresh one.
+			if (createdId) {
+				await fetch(`/api/projects/${createdId}`, { method: 'DELETE' }).catch(() => {});
+			}
 			error = e instanceof Error ? e.message : 'Something went wrong';
 			step = 1;
 		}
@@ -74,8 +81,8 @@
 
 	async function finalize() {
 		step = 4;
-		// Save to localStorage and navigate
-		localStorage.setItem('currentProjectId', projectId);
+		// Make the new project the current one, then navigate
+		setProjectId(projectId);
 		await goto('/');
 		window.location.reload();
 	}

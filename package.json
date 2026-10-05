@@ -3,6 +3,9 @@
 	"private": true,
 	"version": "0.0.1",
 	"type": "module",
+	"engines": {
+		"node": ">=20.19"
+	},
 	"scripts": {
 		"dev": "vite dev",
 		"build": "vite build",
@@ -16,9 +19,11 @@
 		"db:generate": "drizzle-kit generate",
 		"db:migrate": "drizzle-kit migrate",
 		"db:studio": "drizzle-kit studio",
-		"db:push:pg": "DB_DIALECT=postgres drizzle-kit push",
-		"db:generate:pg": "DB_DIALECT=postgres drizzle-kit generate",
-		"db:studio:pg": "DB_DIALECT=postgres drizzle-kit studio"
+		"db:push:pg": "cross-env DB_DIALECT=postgres drizzle-kit push",
+		"db:generate:pg": "cross-env DB_DIALECT=postgres drizzle-kit generate",
+		"db:studio:pg": "cross-env DB_DIALECT=postgres drizzle-kit studio",
+		"test": "vitest run",
+		"test:watch": "vitest"
 	},
 	"devDependencies": {
 		"@sveltejs/adapter-auto": "^7.0.0",
@@ -30,6 +35,7 @@
 		"@types/node": "^20",
 		"bits-ui": "^2.17.2",
 		"clsx": "^2.1.1",
+		"cross-env": "^10.1.0",
 		"drizzle-kit": "^0.31.8",
 		"drizzle-orm": "^0.45.1",
 		"lucide-svelte": "^1.0.1",
@@ -42,7 +48,8 @@
 		"tailwind-variants": "^3.2.2",
 		"tailwindcss": "^4.1.18",
 		"typescript": "^5.9.3",
-		"vite": "^7.3.1"
+		"vite": "^7.3.1",
+		"vitest": "^4.1.11"
 	},
 	"dependencies": {
 		"@ai-sdk/google": "^3.0.64",

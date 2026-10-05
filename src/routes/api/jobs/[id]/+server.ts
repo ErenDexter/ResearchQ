@@ -19,7 +19,7 @@ export const GET: RequestHandler = async ({ params }) => {
 	return json(job[0]);
 };
 
-// Retry a failed job — resumes from the last completed phase
+// Retry a failed or stalled job — resumes from the last completed phase
 export const POST: RequestHandler = async ({ params }) => {
 	const [job] = await db
 		.select()
@@ -28,8 +28,11 @@ export const POST: RequestHandler = async ({ params }) => {
 		.limit(1);
 
 	if (!job) return error(404, 'Job not found');
-	if (job.status !== 'failed') {
-		return json({ error: 'Only failed jobs can be retried' }, { status: 400 });
+	if (job.status === 'completed') {
+		return json({ error: 'Completed jobs cannot be retried' }, { status: 400 });
+	}
+	if (jobQueue.has(job.id)) {
+		return json({ error: 'Job is already queued or running' }, { status: 409 });
 	}
 
 	// Reset status but keep completedPhases so it resumes from where it left off

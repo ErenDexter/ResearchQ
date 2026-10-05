@@ -35,12 +35,11 @@ No. Each project has its own scoped data. Papers, keywords, dimensions, and revi
 
 ### How much does the LLM cost to run?
 
-Ballpark, with default settings (`gemini-2.0-flash` via Vercel AI Gateway):
+Measured with the default model (`gemini-3.1-flash-lite`, paid tier, October 2026 prices):
 
-- **Project setup** (keywords + dimensions + criteria): ~1 call per project, cents.
-- **Relevance screening**: batched ~10 papers per call. 500 papers ≈ 50 calls. Pennies to a few dollars on the free tier.
-- **Metadata extraction**: 1 call per relevant paper. 200 relevant papers ≈ 200 calls. A few dollars.
-- **Synthesis outputs**: 1 call per generated output (narrative summary, GRADE table, etc.). Pennies to a dollar each.
+- **Project setup** (keywords + dimensions + criteria): 1 call per project, well under a cent.
+- **A search**: screening is batched 15 papers per call, and each relevant paper then takes 2 calls (metadata extraction + framework classification). A 17-paper search with 8 relevant papers used 20 calls and cost about $0.01 — roughly $0.25–0.50 per 1,000 papers found, depending on how many are relevant.
+- **Synthesis outputs**: 1 call per generated output (narrative summary, GRADE table, etc.) — about a tenth of a cent each for a small review, rising with the number of included studies (capped at 30–50 studies per output).
 
 Actual costs depend on model choice and token counts. Both Vercel AI Gateway and Google AI Studio offer usable free tiers that cover most evaluation use. Monitor usage in their dashboards.
 
@@ -63,11 +62,17 @@ A few common reasons:
 
 ### Can I resume a search that got interrupted?
 
-Yes, for **database** strategies (publisher-scoped). Run the same search again — the tool picks up from the last saved cursor. For other strategies, re-running will re-fetch from the top, but already-stored papers are deduplicated by OpenAlex ID so nothing is duplicated.
+Yes. Every search runs as a checkpointed job (search → store → screen → extract). If a job fails — an LLM/API error, or the server restarting mid-run — it is marked **failed** with the reason, and **Retry** (on the Search or Jobs page) resumes from the last completed phase, processing only the papers that were not finished.
+
+For **database** strategies (publisher-scoped), running the same search again also picks up from the last saved OpenAlex cursor. For other strategies, re-running re-fetches from the top, but papers already in the project are recognised by OpenAlex ID, so nothing is duplicated. (Each project keeps its own copy, so the same paper can appear in several projects.)
 
 ### The AI marked a paper as "not relevant" but I disagree. What do I do?
 
-Open the paper (**Papers** page → click a row) and flip the Relevant toggle. Your override is persisted and used downstream (cross-reference matrix, methodology outputs).
+Open the paper (**Papers** page → click a row) and use **Include** / **Exclude** in the Screening card. Your decision is persisted, recorded as a *manual* decision, and used downstream (cross-reference matrix, exports, methodology outputs).
+
+### What do "Kept by default" and "Not screened" mean?
+
+Every screening decision records who made it. **AI screening** is the model's call. **Kept by default** means the model's answer for that paper was unusable, so the paper was included rather than silently dropped — the Papers page flags these with *Verify*. **Kept without AI screening** means AI filtering was switched off for that search. **Not screened** papers have no decision yet; they are shown separately (never counted as excluded) in the PRISMA flow and study-selection table.
 
 If the AI is consistently wrong in the same direction, improve the project's **relevance definition** in `/projects/<id>/settings`. The new definition applies to future screening calls. Past decisions are not re-run automatically, but you can trigger a re-screen from the Jobs page if you need to.
 
@@ -111,7 +116,7 @@ Cold-start latency on the LLM provider side. Subsequent calls are faster.
 
 A few tricks:
 
-- Use **`gemini-2.0-flash`** (default) rather than `gemini-2.5-pro` for relevance screening — flash is fast enough and good enough for most domains.
+- Use a **flash-lite** model (the default) rather than a pro model for relevance screening — it is fast enough and good enough for most domains.
 - Set `OPENALEX_EMAIL` to get into the polite pool.
 - For exploratory work, set `max_results=25–50`; expand to hundreds once you've validated the query.
 - Turn off relevance filtering on the search form if you want to store everything and filter later.

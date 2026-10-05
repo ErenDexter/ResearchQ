@@ -58,30 +58,29 @@ export const POST: RequestHandler = async ({ params }) => {
 			if (!normalized) continue;
 
 			// Upsert into global keywords table
-			let [existing] = await db
+			await db
+				.insert(keywords)
+				.values({ term: normalized, isBaseKeyword: false })
+				.onConflictDoNothing({ target: keywords.term });
+			const [existing] = await db
 				.select({ id: keywords.id })
 				.from(keywords)
 				.where(eq(keywords.term, normalized))
 				.limit(1);
 
-			if (!existing) {
-				[existing] = await db
-					.insert(keywords)
-					.values({ term: normalized, isBaseKeyword: false })
-					.returning({ id: keywords.id });
-			}
-
-			// Link to project (ignore if already linked)
-			try {
-				await db.insert(projectKeywords).values({
+			// Link to project as a base keyword (promoting it if it was previously discovered)
+			await db
+				.insert(projectKeywords)
+				.values({
 					projectId: params.id,
 					keywordId: existing.id,
 					isBaseKeyword: true,
 					relevanceScore: 1.0
+				})
+				.onConflictDoUpdate({
+					target: [projectKeywords.projectId, projectKeywords.keywordId],
+					set: { isBaseKeyword: true, relevanceScore: 1.0 }
 				});
-			} catch {
-				// unique constraint violation — already linked
-			}
 		}
 
 		// Reload the final state

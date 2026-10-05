@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { getProjectId } from '$lib/current-project';
 	import Card from '$lib/components/ui/Card.svelte';
 	import Button from '$lib/components/ui/Button.svelte';
 	import Input from '$lib/components/ui/Input.svelte';
@@ -32,6 +33,7 @@
 		if (yearFilter) params.set('year', yearFilter);
 		if (relevantOnly) params.set('relevant', 'true');
 		if (jobIdFilter) params.set('jobId', jobIdFilter);
+		params.set('projectId', getProjectId());
 		params.set('page', String(currentPage));
 		params.set('limit', '50');
 
@@ -52,41 +54,19 @@
 		loadPapers();
 	}
 
+	/** Exports every paper matching the current filters (not just the visible page). */
 	function exportCSV() {
-		const headers = [
-			'Title',
-			'DOI',
-			'Year',
-			'Authors',
-			'Region',
-			'Platform',
-			'Summary',
-			'Methodology',
-			'Target Population',
-			'Keywords'
-		];
-
-		const rows = paperData.papers.map((p: any) => [
-			`"${(p.title || '').replace(/"/g, '""')}"`,
-			p.doi || '',
-			p.publicationYear || '',
-			`"${(p.authors || []).map((a: any) => a.name).join('; ')}"`,
-			p.focusedRegion || '',
-			p.platformDomain || '',
-			`"${(p.summary || '').replace(/"/g, '""')}"`,
-			`"${(p.methodologySummary || '').replace(/"/g, '""')}"`,
-			p.targetPopulation || '',
-			`"${(p.keywords || []).join('; ')}"`
-		]);
-
-		const csv = [headers.join(','), ...rows.map((r: string[]) => r.join(','))].join('\n');
-		const blob = new Blob([csv], { type: 'text/csv' });
-		const url = URL.createObjectURL(blob);
-		const a = document.createElement('a');
-		a.href = url;
-		a.download = 'algorithm-auditing-papers.csv';
-		a.click();
-		URL.revokeObjectURL(url);
+		const projectId = getProjectId();
+		if (!projectId) return;
+		const params = new URLSearchParams({ format: 'csv' });
+		if (searchQuery) params.set('search', searchQuery);
+		if (yearFilter) {
+			params.set('yearMin', yearFilter);
+			params.set('yearMax', yearFilter);
+		}
+		if (relevantOnly) params.set('relevant', 'true');
+		if (jobIdFilter) params.set('jobId', jobIdFilter);
+		window.open(`/api/projects/${projectId}/export?${params.toString()}`);
 	}
 
 	const totalPages = $derived(Math.ceil(paperData.total / paperData.limit) || 1);
@@ -178,13 +158,18 @@
 								{/if}
 								{#if paper.isRelevant}
 									<Badge variant="success">Relevant</Badge>
+									{#if paper.relevanceSource === 'ai_fallback'}
+										<Badge variant="warning" title="AI screening output was unusable, so this paper was kept by default">Verify</Badge>
+									{/if}
 								{:else if paper.isRelevant === false}
 									<Badge variant="destructive">Not relevant</Badge>
+								{:else}
+									<Badge variant="outline">Not screened</Badge>
 								{/if}
 								{#if paper.focusedRegion && paper.focusedRegion !== 'Not specified'}
 									<Badge variant="secondary">{paper.focusedRegion}</Badge>
 								{/if}
-								{#if paper.platformDomain && paper.platformDomain !== 'General AI/ML'}
+								{#if paper.platformDomain && paper.platformDomain !== 'General'}
 									<Badge variant="secondary">{paper.platformDomain}</Badge>
 								{/if}
 								{#each (paper.keywords || []).slice(0, 3) as kw}
@@ -207,6 +192,7 @@
 							<button
 								class="rounded p-1.5 text-zinc-400 hover:bg-red-50 hover:text-red-600"
 								onclick={() => deletePaper(paper.id)}
+								aria-label="Delete paper"
 							>
 								<Trash2 class="h-4 w-4" />
 							</button>

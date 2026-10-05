@@ -8,7 +8,7 @@ This guide walks through a fresh install of ResearchQ on macOS, Linux, and Windo
 
 | Component | Minimum | Notes |
 |---|---|---|
-| Node.js | ≥ 20 (LTS) | Check with `node -v` |
+| Node.js | ≥ 20.19 (LTS) | Check with `node -v` — Vite 7 needs 20.19+ |
 | pnpm | ≥ 9 | Or use `npm` / `yarn` with equivalent commands |
 | Build toolchain | C/C++ compiler + Python 3 | Needed for `better-sqlite3` native compilation |
 | LLM API key | One of: Vercel AI Gateway OR Google AI Studio | Free tiers of both are sufficient for evaluation |

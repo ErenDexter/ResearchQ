@@ -8,7 +8,7 @@ import {
 	reviewPhaseProgress,
 	reviewOutputs
 } from '$lib/server/db/schema';
-import { eq, and } from 'drizzle-orm';
+import { eq, and, desc } from 'drizzle-orm';
 
 export const GET: RequestHandler = async ({ params }) => {
 	const [review] = await db
@@ -56,11 +56,12 @@ export const GET: RequestHandler = async ({ params }) => {
 		};
 	});
 
-	// Get all outputs
+	// Get all outputs (newest first)
 	const outputs = await db
 		.select()
 		.from(reviewOutputs)
-		.where(eq(reviewOutputs.projectReviewId, review.id));
+		.where(eq(reviewOutputs.projectReviewId, review.id))
+		.orderBy(desc(reviewOutputs.generatedAt));
 
 	return json({
 		review,
@@ -75,15 +76,20 @@ export const PATCH: RequestHandler = async ({ params, request }) => {
 	const updates: Record<string, unknown> = {};
 
 	if (body.status !== undefined) {
+		if (!['setup', 'in_progress', 'completed'].includes(body.status)) {
+			return json({ error: 'status must be one of: setup, in_progress, completed' }, { status: 400 });
+		}
 		updates.status = body.status;
 		if (body.status === 'in_progress' && !body.startedAt) {
 			updates.startedAt = new Date().toISOString();
 		}
-		if (body.status === 'completed') {
-			updates.completedAt = new Date().toISOString();
-		}
+		updates.completedAt = body.status === 'completed' ? new Date().toISOString() : null;
 	}
 	if (body.config !== undefined) updates.config = JSON.stringify(body.config);
+
+	if (Object.keys(updates).length === 0) {
+		return json({ error: 'No valid fields to update' }, { status: 400 });
+	}
 
 	await db
 		.update(projectReviews)

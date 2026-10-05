@@ -1,4 +1,4 @@
-import { boolean, doublePrecision, integer, pgTable, text, uniqueIndex } from 'drizzle-orm/pg-core';
+import { boolean, doublePrecision, index, integer, pgTable, text, uniqueIndex } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 
 // ─── Projects ──────────────────────────────────────────────────────
@@ -75,7 +75,7 @@ export const papers = pgTable('papers', {
 		.references(() => projects.id, { onDelete: 'cascade' }),
 	title: text('title').notNull(),
 	doi: text('doi'),
-	openalexId: text('openalex_id').unique(),
+	openalexId: text('openalex_id'), // unique per project (see papers_project_openalex_unique)
 	abstract: text('abstract'),
 	publicationYear: integer('publication_year'),
 	paperUrl: text('paper_url'),
@@ -84,7 +84,8 @@ export const papers = pgTable('papers', {
 	targetPopulation: text('target_population'),
 	focusedRegion: text('focused_region'),
 	platformDomain: text('platform_domain'),
-	isRelevant: boolean('is_relevant'),
+	isRelevant: boolean('is_relevant'), // null = not screened yet
+	relevanceSource: text('relevance_source'), // 'ai' | 'ai_fallback' | 'auto_include' | 'manual' — who made the screening decision
 	sourceType: text('source_type'), // 'journal_search' | 'author_search' | 'topic_search' | 'citation_search' | 'related_search'
 	searchJobId: text('search_job_id'),
 	journalName: text('journal_name'),
@@ -92,7 +93,10 @@ export const papers = pgTable('papers', {
 	createdAt: text('created_at')
 		.notNull()
 		.default(sql`now()::text`)
-});
+}, (table) => [
+	uniqueIndex('papers_project_openalex_unique').on(table.projectId, table.openalexId),
+	index('papers_search_job_idx').on(table.searchJobId)
+]);
 
 // ─── Paper ↔ Author (many-to-many) ─────────────────────────────────
 export const paperAuthors = pgTable('paper_authors', {
@@ -174,7 +178,7 @@ export const searchJobs = pgTable('search_jobs', {
 		.$defaultFn(() => crypto.randomUUID()),
 	projectId: text('project_id')
 		.references(() => projects.id, { onDelete: 'cascade' }),
-	type: text('type').notNull(), // 'journal' | 'author' | 'topic' | 'citation_forward' | 'citation_backward' | 'related' | 'snowball' | 'database'
+	type: text('type').notNull(), // 'journal' | 'author' | 'topic' | 'citation_forward' | 'citation_backward' | 'related' | 'database'
 	query: text('query').notNull(),
 	status: text('status').notNull().default('pending'),
 	// 'pending' | 'queued' | 'searching' | 'filtering' | 'extracting' | 'completed' | 'failed'
@@ -286,7 +290,9 @@ export const analysisTags = pgTable('analysis_tags', {
 		.references(() => papers.id, { onDelete: 'cascade' }),
 	dimension: text('dimension').notNull(),
 	value: text('value').notNull()
-});
+}, (table) => [
+	index('analysis_tags_paper_idx').on(table.paperId)
+]);
 
 // ─── Review Methodologies (global library) ──────────────────────────
 export const reviewMethodologies = pgTable('review_methodologies', {

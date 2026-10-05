@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { getProjectId } from '$lib/current-project';
 	import Card from '$lib/components/ui/Card.svelte';
 	import Badge from '$lib/components/ui/Badge.svelte';
 	import { BookOpen, Search, Database } from 'lucide-svelte';
@@ -7,10 +8,6 @@
 	let loading = $state(true);
 	let filterPublisher = $state('');
 
-	function getProjectId(): string {
-		if (typeof window === 'undefined') return '';
-		return (window as any).__currentProjectId || localStorage.getItem('currentProjectId') || '';
-	}
 
 	async function loadJournals() {
 		loading = true;

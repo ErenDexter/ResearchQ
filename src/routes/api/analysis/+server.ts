@@ -2,21 +2,20 @@ import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { db } from '$lib/server/db';
 import { papers, analysisTags, projectDimensions } from '$lib/server/db/schema';
-import { eq, sql, and } from 'drizzle-orm';
-import { getDefaultProjectId } from '$lib/server/project-context';
+import { eq, sql, and, count, desc, isNotNull, inArray } from 'drizzle-orm';
+import { resolveProjectId } from '$lib/server/project-context';
 
-export const GET: RequestHandler = async ({ url }) => {
-	const projectId = url.searchParams.get('projectId') || (await getDefaultProjectId());
+export const GET: RequestHandler = async ({ url, cookies }) => {
+	const projectId = await resolveProjectId(url.searchParams.get('projectId'), cookies);
 
 	const projectFilter = projectId ? eq(papers.projectId, projectId) : undefined;
-	const relevantFilter = eq(papers.isRelevant, true);
-	const baseWhere = projectFilter ? and(relevantFilter, projectFilter) : relevantFilter;
+	const baseWhere = and(eq(papers.isRelevant, true), projectFilter);
 
 	// Papers by year
 	const byYear = await db
 		.select({
 			year: papers.publicationYear,
-			count: sql<number>`count(*)`
+			count: count()
 		})
 		.from(papers)
 		.where(baseWhere)
@@ -27,35 +26,38 @@ export const GET: RequestHandler = async ({ url }) => {
 	const byRegion = await db
 		.select({
 			region: papers.focusedRegion,
-			count: sql<number>`count(*)`
+			count: count()
 		})
 		.from(papers)
-		.where(and(baseWhere, sql`${papers.focusedRegion} IS NOT NULL`))
+		.where(and(baseWhere, isNotNull(papers.focusedRegion)))
 		.groupBy(papers.focusedRegion)
-		.orderBy(sql`count(*) DESC`)
+		.orderBy(desc(count()))
 		.limit(20);
 
 	// Papers by platform domain
 	const byPlatform = await db
 		.select({
 			platform: papers.platformDomain,
-			count: sql<number>`count(*)`
+			count: count()
 		})
 		.from(papers)
-		.where(and(baseWhere, sql`${papers.platformDomain} IS NOT NULL`))
+		.where(and(baseWhere, isNotNull(papers.platformDomain)))
 		.groupBy(papers.platformDomain)
-		.orderBy(sql`count(*) DESC`);
+		.orderBy(desc(count()));
 
 	// Analysis tags distribution (scoped to project papers)
 	const tagWhere = projectId
-		? sql`${analysisTags.paperId} IN (SELECT id FROM papers WHERE project_id = ${projectId})`
+		? inArray(
+				analysisTags.paperId,
+				db.select({ id: papers.id }).from(papers).where(eq(papers.projectId, projectId))
+			)
 		: undefined;
 
 	const tagDistribution = await db
 		.select({
 			dimension: analysisTags.dimension,
 			value: analysisTags.value,
-			count: sql<number>`count(*)`
+			count: count()
 		})
 		.from(analysisTags)
 		.where(tagWhere)
@@ -77,13 +79,10 @@ export const GET: RequestHandler = async ({ url }) => {
 	}
 
 	// Total stats
-	const allPapersWhere = projectFilter || undefined;
-	const totalPapers = (
-		await db.select({ count: sql<number>`count(*)` }).from(papers).where(allPapersWhere)
-	)[0]?.count || 0;
-	const relevantPapers = (
-		await db.select({ count: sql<number>`count(*)` }).from(papers).where(baseWhere)
-	)[0]?.count || 0;
+	const [[{ totalPapers }], [{ relevantPapers }]] = await Promise.all([
+		db.select({ totalPapers: count() }).from(papers).where(projectFilter),
+		db.select({ relevantPapers: count() }).from(papers).where(baseWhere)
+	]);
 
 	return json({
 		totalPapers,

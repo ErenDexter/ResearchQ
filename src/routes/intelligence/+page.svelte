@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { getProjectId } from '$lib/current-project';
 	import { onMount } from 'svelte';
 	import Card from '$lib/components/ui/Card.svelte';
 	import Badge from '$lib/components/ui/Badge.svelte';
@@ -17,10 +18,6 @@
 			: 1
 	);
 
-	function getProjectId(): string {
-		if (typeof window === 'undefined') return '';
-		return (window as any).__currentProjectId || localStorage.getItem('currentProjectId') || '';
-	}
 
 	onMount(async () => {
 		const projectId = getProjectId();

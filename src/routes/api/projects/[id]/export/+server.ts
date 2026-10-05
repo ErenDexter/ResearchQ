@@ -1,17 +1,10 @@
 import type { RequestHandler } from './$types';
 import { exportToCSV, exportToBibTeX, exportToJSON } from '$lib/server/export';
+import { parsePaperFilters } from '$lib/server/paper-filters';
 
 export const GET: RequestHandler = async ({ params, url }) => {
 	const format = url.searchParams.get('format') || 'csv';
-	const filters = {
-		projectId: params.id,
-		relevantOnly: url.searchParams.get('relevant') === 'true',
-		yearMin: url.searchParams.get('yearMin') ? parseInt(url.searchParams.get('yearMin')!) : undefined,
-		yearMax: url.searchParams.get('yearMax') ? parseInt(url.searchParams.get('yearMax')!) : undefined,
-		region: url.searchParams.get('region') || undefined,
-		platform: url.searchParams.get('platform') || undefined,
-		search: url.searchParams.get('search') || undefined
-	};
+	const filters = parsePaperFilters(params.id, url.searchParams);
 
 	let content: string;
 	let contentType: string;
@@ -20,17 +13,17 @@ export const GET: RequestHandler = async ({ params, url }) => {
 	switch (format) {
 		case 'bibtex':
 			content = await exportToBibTeX(filters);
-			contentType = 'application/x-bibtex';
+			contentType = 'application/x-bibtex; charset=utf-8';
 			filename = 'papers.bib';
 			break;
 		case 'json':
 			content = await exportToJSON(filters);
-			contentType = 'application/json';
+			contentType = 'application/json; charset=utf-8';
 			filename = 'papers.json';
 			break;
 		default:
 			content = await exportToCSV(filters);
-			contentType = 'text/csv';
+			contentType = 'text/csv; charset=utf-8';
 			filename = 'papers.csv';
 	}
 

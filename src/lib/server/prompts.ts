@@ -26,7 +26,7 @@ export function buildRelevanceFilterPrompt(ctx: PromptContext, papers: PaperInpu
 	const paperList = papers
 		.map(
 			(p, i) =>
-				`[${i}] ID: ${p.id}\nTitle: ${p.title}\nAbstract: ${p.abstract.slice(0, 500)}\nKeywords: ${p.keywords.join(', ')}`
+				`[${i}]\nTitle: ${p.title}\nAbstract: ${p.abstract.slice(0, 500) || 'No abstract available'}\nKeywords: ${p.keywords.join(', ')}`
 		)
 		.join('\n\n---\n\n');
 
@@ -51,8 +51,8 @@ ${relevantCriteria}
 A paper is NOT relevant if it:
 ${notRelevantCriteria}
 
-For each paper, respond with a JSON array of objects with these fields:
-- "id": the paper ID
+Respond with a JSON object {"results": [...]} containing exactly one entry per paper, with these fields:
+- "index": the paper's number shown in brackets, e.g. 0 for [0]
 - "isRelevant": boolean
 - "confidence": number between 0 and 1
 
@@ -60,7 +60,7 @@ Papers:
 
 ${paperList}
 
-Respond ONLY with a valid JSON array. No other text.`;
+Respond ONLY with the JSON object. No other text.`;
 }
 
 // ─── Metadata Extraction Prompt ────────────────────────────────────
@@ -139,12 +139,12 @@ Evaluate whether each of the following candidate keywords is relevant to this sp
 Candidate keywords:
 ${keywordList}
 
-For each keyword, respond with a JSON array of objects with these fields:
-- "keyword": the keyword string
+Respond with a JSON object {"results": [...]} containing one entry per keyword, with these fields:
+- "keyword": the keyword string, exactly as given
 - "isRelevant": boolean (true if genuinely relevant to the domain)
 - "score": number between 0 and 1 (relevance confidence)
 
-Respond ONLY with a valid JSON array. No other text.`;
+Respond ONLY with the JSON object. No other text.`;
 }
 
 // ─── Search Proposal Prompt ────────────────────────────────────────

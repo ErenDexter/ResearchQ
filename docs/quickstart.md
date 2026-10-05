@@ -39,10 +39,10 @@ Navigate to **Search** in the left sidebar. Pick one of six strategies:
 | Cited By | Forward citations from a seminal paper |
 | References | Backward citations from a paper |
 
-For a first run, **Topic** search with a narrow keyword (e.g., *recidivism algorithm audit*) is the fastest way to see results. Set:
+For a first run, **Topic** search with a narrow term (e.g., *recidivism algorithm audit*) is the fastest way to see results. Separate several terms with commas, or leave the field empty to search with your project's keywords. Set:
 
-- **Max results**: 50 (keep it small to start)
 - **Date range**: optional; leave empty for all years
+- **Maximum papers** (Database strategy only): keep it small, e.g. 100, to start
 
 Submit. The Jobs page shows live progress:
 

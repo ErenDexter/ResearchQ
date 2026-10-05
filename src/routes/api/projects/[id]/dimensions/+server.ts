@@ -16,7 +16,8 @@ export const GET: RequestHandler = async ({ params }) => {
 
 export const POST: RequestHandler = async ({ params, request }) => {
 	const body = await request.json();
-	const { name, label, description, position } = body;
+	const name = typeof body.name === 'string' ? body.name.trim() : '';
+	const label = typeof body.label === 'string' ? body.label.trim() : '';
 
 	if (!name || !label) {
 		return json({ error: 'Name and label are required' }, { status: 400 });
@@ -26,10 +27,10 @@ export const POST: RequestHandler = async ({ params, request }) => {
 		.insert(projectDimensions)
 		.values({
 			projectId: params.id,
-			name: name.trim(),
-			label: label.trim(),
-			description: description?.trim() || '',
-			position: position ?? 0
+			name,
+			label,
+			description: typeof body.description === 'string' ? body.description.trim() : '',
+			position: Number.isInteger(body.position) ? body.position : 0
 		})
 		.returning();
 
@@ -38,10 +39,24 @@ export const POST: RequestHandler = async ({ params, request }) => {
 
 export const PATCH: RequestHandler = async ({ params, request }) => {
 	const body = await request.json();
-	const { dimensionId, ...updates } = body;
+	const { dimensionId } = body;
 
 	if (!dimensionId) {
 		return json({ error: 'dimensionId is required' }, { status: 400 });
+	}
+
+	// Only these fields are editable — never id or projectId.
+	const updates: Partial<{ name: string; label: string; description: string; position: number }> = {};
+	for (const field of ['name', 'label', 'description'] as const) {
+		if (typeof body[field] === 'string') updates[field] = body[field].trim();
+	}
+	if (Number.isInteger(body.position)) updates.position = body.position;
+
+	if (Object.keys(updates).length === 0) {
+		return json({ error: 'No valid fields to update' }, { status: 400 });
+	}
+	if (updates.name === '' || updates.label === '') {
+		return json({ error: 'Name and label cannot be empty' }, { status: 400 });
 	}
 
 	await db

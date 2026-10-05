@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { getProjectId } from '$lib/current-project';
+	import { onDestroy } from 'svelte';
 	import Card from '$lib/components/ui/Card.svelte';
 	import Button from '$lib/components/ui/Button.svelte';
 	import Input from '$lib/components/ui/Input.svelte';
@@ -22,10 +24,6 @@
 	let pollInterval = $state<ReturnType<typeof setInterval> | null>(null);
 	let recentJobs = $state<any[]>([]);
 
-	function getProjectId(): string {
-		if (typeof window === 'undefined') return '';
-		return (window as any).__currentProjectId || localStorage.getItem('currentProjectId') || '';
-	}
 
 	const searchStrategies = [
 		{ type: 'journal' as const, label: 'Journal', icon: BookOpen, description: 'Search papers from a specific journal or venue' },
@@ -37,10 +35,13 @@
 		{ type: 'database' as const, label: 'Database', icon: Database, description: 'Search papers from a publisher/database (IEEE, ACM, Springer, etc.)' },
 	];
 
+	// Topic search may run on the project's keywords alone.
+	const queryOptional = $derived(searchType === 'topic');
+
 	const queryLabels: Record<SearchType, string> = {
 		journal: 'Journal Name',
 		author: 'Author Name',
-		topic: 'Search Query',
+		topic: 'Search Terms (optional)',
 		citation_forward: 'OpenAlex Work ID',
 		citation_backward: 'OpenAlex Work ID',
 		related: 'OpenAlex Work ID',
@@ -50,7 +51,7 @@
 	const queryPlaceholders: Record<SearchType, string> = {
 		journal: 'e.g., Nature Machine Intelligence',
 		author: 'e.g., Timnit Gebru',
-		topic: 'e.g., algorithmic fairness in hiring',
+		topic: 'e.g., algorithmic fairness, hiring bias — or leave empty to use project keywords',
 		citation_forward: 'e.g., W2741809807',
 		citation_backward: 'e.g., W2741809807',
 		related: 'e.g., W2741809807',
@@ -71,7 +72,7 @@
 	});
 
 	async function startSearch() {
-		if (!query.trim()) return;
+		if (!query.trim() && !queryOptional) return;
 		isLoading = true;
 
 		try {
@@ -124,6 +125,22 @@
 		}, 2000);
 	}
 
+	onDestroy(() => {
+		if (pollInterval) clearInterval(pollInterval);
+	});
+
+	async function retryJob(jobId: string) {
+		const res = await fetch(`/api/jobs/${jobId}`, { method: 'POST' });
+		const data = await res.json().catch(() => ({}));
+		if (!res.ok) {
+			alert(data.error || 'Could not retry this search');
+			return;
+		}
+		activeJob = data;
+		startPolling(jobId);
+		loadRecentJobs();
+	}
+
 	const statusMessages: Record<string, string> = {
 		pending: 'Waiting to start...',
 		queued: 'Queued, waiting for other jobs to finish...',
@@ -160,8 +177,8 @@
 		<div class="space-y-5">
 			<!-- Search strategy selector -->
 			<div>
-				<label class="mb-2 block text-sm font-medium text-zinc-700">Search Strategy</label>
-				<div class="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
+				<p id="strategyLabel" class="mb-2 block text-sm font-medium text-zinc-700">Search Strategy</p>
+				<div class="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6" role="group" aria-labelledby="strategyLabel">
 					{#each searchStrategies as strategy}
 						<button
 							class="flex flex-col items-center gap-1.5 rounded-lg border px-3 py-3 text-center transition-colors {searchType === strategy.type
@@ -194,7 +211,7 @@
 						class="flex-1"
 						onkeydown={(e: KeyboardEvent) => e.key === 'Enter' && startSearch()}
 					/>
-					<Button onclick={startSearch} disabled={isLoading || !query.trim()}>
+					<Button onclick={startSearch} disabled={isLoading || (!query.trim() && !queryOptional)}>
 						{#if isLoading}
 							<Loader2 class="h-4 w-4 animate-spin" />
 						{:else}
@@ -207,7 +224,8 @@
 					{#if searchType === 'author'}
 						Fetches ALL papers by this author, then uses AI to filter for relevance to your project.
 					{:else if searchType === 'topic'}
-						Searches OpenAlex using your project's keywords. No journal or author constraint.
+						Searches all of OpenAlex (no journal or author constraint) for the terms you enter — separate
+						terms with commas. Leave empty to search with your project's keywords.
 					{:else if searchType === 'citation_forward' || searchType === 'citation_backward' || searchType === 'related'}
 						Enter an OpenAlex Work ID (e.g., W2741809807) or full URL.
 					{:else if searchType === 'database'}
@@ -221,15 +239,16 @@
 
 			<!-- Date range filter -->
 			<div>
-				<label class="mb-2 block text-sm font-medium text-zinc-700">
+				<p id="dateRangeLabel" class="mb-2 block text-sm font-medium text-zinc-700">
 					Publication Date Range <span class="font-normal text-zinc-400">(optional)</span>
-				</label>
-				<div class="flex items-center gap-3">
+				</p>
+				<div class="flex items-center gap-3" role="group" aria-labelledby="dateRangeLabel">
 					<Input
 						id="dateFrom"
 						type="date"
 						bind:value={dateFrom}
 						class="w-44"
+						aria-label="Published from"
 					/>
 					<span class="text-sm text-zinc-400">to</span>
 					<Input
@@ -237,6 +256,7 @@
 						type="date"
 						bind:value={dateTo}
 						class="w-44"
+						aria-label="Published until"
 					/>
 					{#if dateFrom || dateTo}
 						<button
@@ -319,7 +339,7 @@
 						</p>
 						<p class="text-xs text-zinc-500">
 							<Badge variant="outline" class="mr-1">{activeJob.type}</Badge>
-							{activeJob.query}
+							{activeJob.query || "(project keywords)"}
 						</p>
 					</div>
 				</div>
@@ -349,13 +369,7 @@
 						</a>
 					</div>
 				{:else if activeJob.status === 'failed'}
-					<Button variant="outline" onclick={async () => {
-						const res = await fetch(`/api/jobs/${activeJob.id}`, { method: 'POST' });
-						if (res.ok) {
-							activeJob = await res.json();
-							startPolling(activeJob.id);
-						}
-					}}>
+					<Button variant="outline" onclick={() => retryJob(activeJob.id)}>
 						<RefreshCw class="mr-2 h-4 w-4" />
 						Retry (resumes from checkpoint)
 					</Button>
@@ -375,7 +389,7 @@
 						<div class="flex items-center gap-3">
 							<TypeIcon class="h-4 w-4 text-zinc-400" />
 							<div>
-								<p class="text-sm font-medium text-zinc-900">{job.query}</p>
+								<p class="text-sm font-medium text-zinc-900">{job.query || "(project keywords)"}</p>
 								<p class="text-xs text-zinc-500">
 									<Badge variant="outline" class="mr-1">{job.type}</Badge>
 									{job.totalFound} found · {job.relevantCount} relevant · {new Date(job.createdAt).toLocaleDateString()}
@@ -392,6 +406,11 @@
 								<a href="/papers?jobId={job.id}&relevant=true">
 									<Button variant="ghost" size="sm">View</Button>
 								</a>
+							{:else if job.status === 'failed'}
+								<Button variant="ghost" size="sm" onclick={() => retryJob(job.id)} title={job.error || 'Retry'}>
+									<RefreshCw class="mr-1 h-3 w-3" />
+									Retry
+								</Button>
 							{/if}
 						</div>
 					</div>

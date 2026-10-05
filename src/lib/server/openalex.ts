@@ -261,6 +261,10 @@ export interface DatabaseBatchCursor {
 	nextCursor: string | null; // null = exhausted
 }
 
+export interface DatabaseBatchResult extends DatabaseBatchCursor {
+	fetched: number; // works fetched by this batch in this run
+}
+
 export async function searchByDatabase(
 	publisherId: string,
 	keywordTerms: string[],
@@ -268,7 +272,7 @@ export async function searchByDatabase(
 	batchCursors?: DatabaseBatchCursor[],
 	dateFrom?: string,
 	dateTo?: string
-): Promise<{ works: OpenAlexWork[]; batchCursors: DatabaseBatchCursor[] }> {
+): Promise<{ works: OpenAlexWork[]; batchCursors: DatabaseBatchResult[] }> {
 	const batches = batchKeywords(keywordTerms); // groups of 4
 	const seenIds = new Set<string>();
 	const allWorks: OpenAlexWork[] = [];
@@ -281,7 +285,7 @@ export async function searchByDatabase(
 		for (const bc of batchCursors) cursorMap.set(bc.searchQuery, bc.nextCursor);
 	}
 
-	const updatedCursors: DatabaseBatchCursor[] = [];
+	const updatedCursors: DatabaseBatchResult[] = [];
 
 	for (let bi = 0; bi < batches.length; bi++) {
 		const searchQuery = batches[bi];
@@ -290,7 +294,7 @@ export async function searchByDatabase(
 		// If this batch was previously exhausted, skip it
 		if (savedCursor === null && cursorMap.has(searchQuery)) {
 			console.log(`[openalex] batch ${bi + 1}/${batches.length}: skipped (cursor exhausted)`);
-			updatedCursors.push({ searchQuery, nextCursor: null });
+			updatedCursors.push({ searchQuery, nextCursor: null, fetched: 0 });
 			continue;
 		}
 
@@ -320,7 +324,7 @@ export async function searchByDatabase(
 			}
 		}
 
-		updatedCursors.push({ searchQuery, nextCursor });
+		updatedCursors.push({ searchQuery, nextCursor, fetched: batchWorks.length });
 
 		if (allWorks.length >= maxResults) break;
 		await sleep(150);

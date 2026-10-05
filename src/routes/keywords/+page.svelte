@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { getProjectId } from '$lib/current-project';
 	import Card from '$lib/components/ui/Card.svelte';
 	import Button from '$lib/components/ui/Button.svelte';
 	import Input from '$lib/components/ui/Input.svelte';
@@ -19,10 +20,6 @@
 	let searchQuery = $state('');
 	let deletingId = $state<string | null>(null);
 
-	function getProjectId(): string {
-		if (typeof window === 'undefined') return '';
-		return (window as any).__currentProjectId || localStorage.getItem('currentProjectId') || '';
-	}
 
 	let filteredKeywords = $derived(
 		searchQuery.trim()

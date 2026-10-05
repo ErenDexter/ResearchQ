@@ -69,6 +69,14 @@ export const PATCH: RequestHandler = async ({ params, request }) => {
 		return json({ error: 'No valid fields to update' }, { status: 400 });
 	}
 
+	if ('isRelevant' in updates) {
+		if (updates.isRelevant !== null && typeof updates.isRelevant !== 'boolean') {
+			return json({ error: 'isRelevant must be true, false or null' }, { status: 400 });
+		}
+		// Record that a person made (or cleared) this screening decision.
+		updates.relevanceSource = updates.isRelevant === null ? null : 'manual';
+	}
+
 	await db.update(papers).set(updates).where(eq(papers.id, params.id));
 
 	const updated = await db.select().from(papers).where(eq(papers.id, params.id)).limit(1);

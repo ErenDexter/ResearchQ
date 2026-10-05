@@ -71,7 +71,7 @@ A useful feature request explains:
 
 ### Prerequisites
 
-- Node.js ≥ 20 (LTS recommended)
+- Node.js ≥ 20.19 (LTS recommended)
 - pnpm ≥ 9
 - A C/C++ toolchain for `better-sqlite3` native compilation (see [docs/installation.md](docs/installation.md))
 - An LLM API key — either a [Vercel AI Gateway](https://vercel.com/ai-gateway) key (free tier works) or a [Google AI Studio](https://aistudio.google.com/apikey) key
@@ -104,6 +104,7 @@ pnpm dev
 | `pnpm build` | Production build |
 | `pnpm preview` | Preview the production build locally |
 | `pnpm check` | Svelte + TypeScript type checks |
+| `pnpm test` | Unit and integration tests (Vitest, throwaway SQLite databases) |
 | `pnpm format` | Prettier auto-format |
 | `pnpm lint` | Prettier check only (no writes) |
 | `pnpm db:push` | Sync the schema to the SQLite database |
@@ -117,6 +118,7 @@ Before opening a PR, please run:
 
 ```bash
 pnpm check    # type checks must pass
+pnpm test     # tests must pass
 pnpm lint     # formatting must pass
 ```
 
@@ -127,7 +129,7 @@ Quick conventions:
 - **Tailwind** — use the existing zinc/emerald palette and sizing scale; don't introduce new design tokens without a reason.
 - **Comments** — explain the *why*, not the *what*. Avoid decorative headers.
 - **Prompts** — all AI prompts live in [src/lib/server/prompts.ts](src/lib/server/prompts.ts). Add new ones there, not inline in service files.
-- **Database** — add new columns to both `schema.sqlite.ts` *and* `schema.pg.ts`. The two files are kept in shape-lockstep; the runtime shim ([schema.ts](src/lib/server/db/schema.ts)) expects both to export the same names.
+- **Database** — add new columns to both `schema.sqlite.ts` *and* `schema.pg.ts`. The two files are kept in shape-lockstep; the runtime shim ([schema.ts](src/lib/server/db/schema.ts)) expects both to export the same names. Queries must work on both dialects: use drizzle's `count()` (or `numeric()` from [db/helpers.ts](src/lib/server/db/helpers.ts)) for aggregates, `containsInsensitive()` instead of `ILIKE`, and literal table names (not `${table.column}`) inside correlated raw-SQL subqueries.
 
 ---
 
@@ -138,7 +140,7 @@ Quick conventions:
    git checkout -b fix/short-description
    ```
 2. **Make your change.** Keep PRs focused — one logical change per PR makes review much faster.
-3. **Run checks** locally: `pnpm check` and `pnpm lint`.
+3. **Run checks** locally: `pnpm check`, `pnpm test` and `pnpm lint`. CI runs `check`, `test` and `build` on every PR.
 4. **Write a clear commit message.** Use imperative mood (`Add X`, not `Added X`). Reference the issue number if one exists (`Fix #42: …`).
 5. **Push and open a PR** against `main`. The PR template will prompt you for a summary and a test plan.
 6. **Respond to review** — we aim to reply within a week. If a review stalls, feel free to ping.
@@ -147,7 +149,7 @@ Quick conventions:
 ### What makes a PR easy to accept
 
 - The change has an issue that discussed the approach (not required for trivial fixes, but helps for anything with design tradeoffs).
-- It doesn't break `pnpm check`.
+- It doesn't break `pnpm check` or `pnpm test`, and adds tests for behaviour changes.
 - It does not add new dependencies without justification.
 - It updates documentation if it changes user-visible behavior.
 - It adds or updates AI prompts in `prompts.ts`, not inline.

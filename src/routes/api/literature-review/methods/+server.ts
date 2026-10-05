@@ -2,7 +2,8 @@ import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { db } from '$lib/server/db';
 import { reviewMethodologies, methodologyPhases } from '$lib/server/db/schema';
-import { eq, desc, sql } from 'drizzle-orm';
+import { sql } from 'drizzle-orm';
+import { numeric } from '$lib/server/db/helpers';
 
 export const GET: RequestHandler = async ({ url }) => {
 	const type = url.searchParams.get('type') || '';
@@ -17,7 +18,8 @@ export const GET: RequestHandler = async ({ url }) => {
 			domain: reviewMethodologies.domain,
 			isBuiltIn: reviewMethodologies.isBuiltIn,
 			createdAt: reviewMethodologies.createdAt,
-			phaseCount: sql<number>`(SELECT COUNT(*) FROM methodology_phases WHERE methodology_id = ${reviewMethodologies.id})`
+			// Literal outer table name: drizzle renders ${reviewMethodologies.id} unqualified, which would bind to methodology_phases.id
+			phaseCount: numeric(sql`(SELECT COUNT(*) FROM methodology_phases WHERE methodology_phases.methodology_id = review_methodologies.id)`)
 		})
 		.from(reviewMethodologies)
 		.orderBy(reviewMethodologies.name);
@@ -31,19 +33,25 @@ export const GET: RequestHandler = async ({ url }) => {
 
 export const POST: RequestHandler = async ({ request }) => {
 	const body = await request.json();
-	const { name, description, type, domain, phases } = body;
+	const { domain, phases } = body;
+	const name = typeof body.name === 'string' ? body.name.trim() : '';
+	const description = typeof body.description === 'string' ? body.description.trim() : '';
+	const type = typeof body.type === 'string' ? body.type.trim() : '';
 
 	if (!name || !description || !type) {
 		return json({ error: 'name, description, and type are required' }, { status: 400 });
+	}
+	if (phases !== undefined && (!Array.isArray(phases) || phases.some((p) => typeof p?.name !== 'string' || !p.name.trim()))) {
+		return json({ error: 'phases must be a list of objects with a name' }, { status: 400 });
 	}
 
 	const [method] = await db
 		.insert(reviewMethodologies)
 		.values({
-			name: name.trim(),
-			description: description.trim(),
+			name,
+			description,
 			type,
-			domain: domain || 'general',
+			domain: typeof domain === 'string' && domain ? domain : 'general',
 			isBuiltIn: false
 		})
 		.returning();
@@ -54,10 +62,10 @@ export const POST: RequestHandler = async ({ request }) => {
 			const phase = phases[i];
 			await db.insert(methodologyPhases).values({
 				methodologyId: method.id,
-				name: phase.name,
+				name: phase.name.trim(),
 				description: phase.description || '',
 				position: i,
-				expectedOutputs: JSON.stringify(phase.expectedOutputs || [])
+				expectedOutputs: JSON.stringify(Array.isArray(phase.expectedOutputs) ? phase.expectedOutputs : [])
 			});
 		}
 	}

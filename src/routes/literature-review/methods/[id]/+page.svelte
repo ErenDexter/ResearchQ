@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { getProjectId } from '$lib/current-project';
 	import { page } from '$app/stores';
 	import { onMount } from 'svelte';
 	import Card from '$lib/components/ui/Card.svelte';
@@ -13,10 +14,6 @@
 	let loading = $state(true);
 	let applying = $state(false);
 
-	function getProjectId(): string {
-		if (typeof window === 'undefined') return '';
-		return (window as any).__currentProjectId || localStorage.getItem('currentProjectId') || '';
-	}
 
 	onMount(async () => {
 		const res = await fetch(`/api/literature-review/methods/${methodId}`);

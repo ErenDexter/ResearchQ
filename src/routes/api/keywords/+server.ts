@@ -3,10 +3,10 @@ import type { RequestHandler } from './$types';
 import { db } from '$lib/server/db';
 import { keywords, projectKeywords } from '$lib/server/db/schema';
 import { desc, eq, and } from 'drizzle-orm';
-import { getDefaultProjectId } from '$lib/server/project-context';
+import { resolveProjectId } from '$lib/server/project-context';
 
-export const GET: RequestHandler = async ({ url }) => {
-	const projectId = url.searchParams.get('projectId') || (await getDefaultProjectId());
+export const GET: RequestHandler = async ({ url, cookies }) => {
+	const projectId = await resolveProjectId(url.searchParams.get('projectId'), cookies);
 
 	if (projectId) {
 		// Return project-scoped keywords with relevance info
@@ -22,7 +22,7 @@ export const GET: RequestHandler = async ({ url }) => {
 			.from(projectKeywords)
 			.innerJoin(keywords, eq(projectKeywords.keywordId, keywords.id))
 			.where(eq(projectKeywords.projectId, projectId))
-			.orderBy(desc(projectKeywords.isBaseKeyword));
+			.orderBy(desc(projectKeywords.isBaseKeyword), keywords.term);
 
 		return json(keywordList);
 	}
@@ -31,12 +31,12 @@ export const GET: RequestHandler = async ({ url }) => {
 	const keywordList = await db
 		.select()
 		.from(keywords)
-		.orderBy(desc(keywords.isBaseKeyword));
+		.orderBy(desc(keywords.isBaseKeyword), keywords.term);
 
 	return json(keywordList);
 };
 
-export const POST: RequestHandler = async ({ request }) => {
+export const POST: RequestHandler = async ({ request, cookies }) => {
 	const body = await request.json();
 	const { term, projectId: reqProjectId } = body;
 
@@ -45,33 +45,33 @@ export const POST: RequestHandler = async ({ request }) => {
 	}
 
 	const normalized = term.toLowerCase().trim();
-	const projectId = reqProjectId || (await getDefaultProjectId());
+	const projectId = await resolveProjectId(reqProjectId, cookies);
 
 	// Upsert into global keywords table
-	let [existing] = await db
+	await db
+		.insert(keywords)
+		.values({ term: normalized, isBaseKeyword: false })
+		.onConflictDoNothing({ target: keywords.term });
+	const [existing] = await db
 		.select({ id: keywords.id })
 		.from(keywords)
 		.where(eq(keywords.term, normalized))
 		.limit(1);
 
-	if (!existing) {
-		[existing] = await db
-			.insert(keywords)
-			.values({ term: normalized, isBaseKeyword: false })
-			.returning({ id: keywords.id });
-	}
-
 	// Link to project if projectId provided
 	if (projectId) {
-		try {
-			await db.insert(projectKeywords).values({
+		const linked = await db
+			.insert(projectKeywords)
+			.values({
 				projectId,
 				keywordId: existing.id,
 				isBaseKeyword: false,
 				relevanceScore: 0.8
-			});
-		} catch {
-			// Already linked to this project
+			})
+			.onConflictDoNothing()
+			.returning({ id: projectKeywords.id });
+
+		if (linked.length === 0) {
 			return json({ error: 'Keyword already exists in this project' }, { status: 409 });
 		}
 	}
@@ -79,9 +79,9 @@ export const POST: RequestHandler = async ({ request }) => {
 	return json({ id: existing.id, term: normalized }, { status: 201 });
 };
 
-export const DELETE: RequestHandler = async ({ url }) => {
+export const DELETE: RequestHandler = async ({ url, cookies }) => {
 	const id = url.searchParams.get('id');
-	const projectId = url.searchParams.get('projectId') || (await getDefaultProjectId());
+	const projectId = await resolveProjectId(url.searchParams.get('projectId'), cookies);
 
 	if (!id) {
 		return json({ error: 'Keyword id is required' }, { status: 400 });

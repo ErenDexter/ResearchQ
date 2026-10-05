@@ -6,10 +6,14 @@
  * 2. Metadata extraction — extract structured fields from paper titles/abstracts
  * 3. Analysis framework classification — map papers to project-specific dimensions
  * 4. Keyword relevance evaluation — score candidate keywords for the project domain
+ *
+ * All calls use schema-validated structured output. Malformed model output is
+ * handled per function (documented below); API/network errors propagate so the
+ * job fails and can be retried from its last checkpoint.
  */
 
-import { generateText } from 'ai';
-import { getModel } from './llm';
+import { z } from 'zod';
+import { generateStructured, MalformedLlmOutputError } from './llm';
 import {
 	type PromptContext,
 	type PaperInput,
@@ -23,10 +27,20 @@ import {
 
 export type { PaperInput } from './prompts';
 
+/**
+ * Who made a paper's screening decision:
+ * - ai           — the model screened it
+ * - ai_fallback  — the model's answer was unusable/missing, so the paper was kept by default
+ * - auto_include — AI screening was skipped for the search, so the paper was kept
+ * - manual       — set by a person
+ */
+export type RelevanceSource = 'ai' | 'ai_fallback' | 'auto_include' | 'manual';
+
 export interface RelevanceResult {
 	id: string;
 	isRelevant: boolean;
 	confidence: number;
+	source: Extract<RelevanceSource, 'ai' | 'ai_fallback'>;
 }
 
 export interface ExtractedMetadata {
@@ -47,61 +61,87 @@ export interface KeywordRelevanceResult {
 	score: number;
 }
 
-function cleanJsonResponse(text: string): string {
-	return text.trim().replace(/^```json?\s*/, '').replace(/```\s*$/, '');
+function clamp01(n: number): number {
+	return Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 0;
 }
 
 // ─── Relevance Filtering (batch) ───────────────────────────────────
 
+const relevanceSchema = z.object({
+	results: z.array(
+		z.object({
+			index: z.number().int(),
+			isRelevant: z.boolean(),
+			confidence: z.number()
+		})
+	)
+});
+
+/**
+ * Screens a batch of papers. Returns exactly one result per input paper.
+ * Papers the model skipped (or every paper, if its output was unusable) are
+ * kept by default and marked `ai_fallback` so the decision stays auditable.
+ */
 export async function filterRelevance(
 	papers: PaperInput[],
 	ctx: PromptContext
 ): Promise<RelevanceResult[]> {
-	const prompt = buildRelevanceFilterPrompt(ctx, papers);
-
-	const { text } = await generateText({
-		model: getModel(),
-		prompt
-	});
-
-	const cleaned = cleanJsonResponse(text);
+	const decisions = new Map<number, { isRelevant: boolean; confidence: number }>();
 
 	try {
-		return JSON.parse(cleaned) as RelevanceResult[];
-	} catch {
-		console.error('Failed to parse Gemini relevance response:', text);
-		// Fallback: mark all as relevant to avoid data loss
-		return papers.map((p) => ({ id: p.id, isRelevant: true, confidence: 0.5 }));
+		const { results } = await generateStructured(
+			relevanceSchema,
+			buildRelevanceFilterPrompt(ctx, papers)
+		);
+		for (const r of results) {
+			if (r.index >= 0 && r.index < papers.length && !decisions.has(r.index)) {
+				decisions.set(r.index, { isRelevant: r.isRelevant, confidence: clamp01(r.confidence) });
+			}
+		}
+	} catch (err) {
+		if (!(err instanceof MalformedLlmOutputError)) throw err;
+		console.error('Relevance screening output unusable; keeping batch by default.');
 	}
+
+	return papers.map((p, i) => {
+		const decision = decisions.get(i);
+		return decision
+			? { id: p.id, ...decision, source: 'ai' as const }
+			: { id: p.id, isRelevant: true, confidence: 0, source: 'ai_fallback' as const };
+	});
 }
 
 // ─── Metadata Extraction (per paper) ───────────────────────────────
+
+const metadataSchema = z.object({
+	summary: z.string(),
+	methodologySummary: z.string(),
+	targetPopulation: z.string(),
+	focusedRegion: z.string(),
+	platformDomain: z.string(),
+	extractedKeywords: z.array(z.string())
+});
 
 export async function extractMetadata(
 	paper: PaperInput,
 	ctx: PromptContext
 ): Promise<ExtractedMetadata> {
-	const prompt = buildMetadataExtractionPrompt(ctx, paper);
-
-	const { text } = await generateText({
-		model: getModel(),
-		prompt
-	});
-
-	const cleaned = cleanJsonResponse(text);
-
 	try {
-		const parsed = JSON.parse(cleaned);
+		const parsed = await generateStructured(
+			metadataSchema,
+			buildMetadataExtractionPrompt(ctx, paper)
+		);
 		return {
-			summary: parsed.summary || '',
-			methodologySummary: parsed.methodologySummary || '',
+			summary: parsed.summary,
+			methodologySummary: parsed.methodologySummary,
 			targetPopulation: parsed.targetPopulation || 'Not specified',
 			focusedRegion: parsed.focusedRegion || 'Not specified',
 			platformDomain: parsed.platformDomain || 'General',
-			extractedKeywords: parsed.extractedKeywords || []
+			extractedKeywords: parsed.extractedKeywords.map((k) => k.trim()).filter(Boolean)
 		};
-	} catch {
-		console.error('Failed to parse Gemini extraction response:', text);
+	} catch (err) {
+		if (!(err instanceof MalformedLlmOutputError)) throw err;
+		// Record the failure on the paper rather than retrying forever.
 		return {
 			summary: '',
 			methodologySummary: '',
@@ -119,55 +159,58 @@ export async function classifyAnalysisFramework(
 	paper: PaperInput & { summary?: string; methodologySummary?: string },
 	ctx: PromptContext
 ): Promise<AnalysisFrameworkTags> {
-	const prompt = buildAnalysisClassificationPrompt(ctx, paper);
+	if (ctx.dimensions.length === 0) return {};
 
-	const { text } = await generateText({
-		model: getModel(),
-		prompt
-	});
-
-	const cleaned = cleanJsonResponse(text);
+	const schema = z.object(
+		Object.fromEntries(ctx.dimensions.map((dim) => [dim.name, z.string()]))
+	) as z.ZodType<Record<string, string>>;
 
 	try {
-		const parsed = JSON.parse(cleaned);
-		// Return only the dimensions defined in the project
+		const parsed = await generateStructured(schema, buildAnalysisClassificationPrompt(ctx, paper));
 		const tags: AnalysisFrameworkTags = {};
 		for (const dim of ctx.dimensions) {
-			tags[dim.name] = parsed[dim.name] || '';
+			tags[dim.name] = parsed[dim.name]?.trim() || '';
 		}
 		return tags;
-	} catch {
-		console.error('Failed to parse Gemini analysis response:', text);
-		const tags: AnalysisFrameworkTags = {};
-		for (const dim of ctx.dimensions) {
-			tags[dim.name] = '';
-		}
-		return tags;
+	} catch (err) {
+		if (!(err instanceof MalformedLlmOutputError)) throw err;
+		return Object.fromEntries(ctx.dimensions.map((dim) => [dim.name, '']));
 	}
 }
 
 // ─── Keyword Relevance Evaluation ──────────────────────────────────
 
+const keywordRelevanceSchema = z.object({
+	results: z.array(
+		z.object({
+			keyword: z.string(),
+			isRelevant: z.boolean(),
+			score: z.number()
+		})
+	)
+});
+
+/** Returns an empty list (nothing accepted) if the model's output is unusable. */
 export async function evaluateKeywordRelevance(
 	candidateKeywords: string[],
 	ctx: PromptContext
 ): Promise<KeywordRelevanceResult[]> {
 	if (candidateKeywords.length === 0) return [];
 
-	const prompt = buildKeywordRelevancePrompt(ctx, candidateKeywords);
-
-	const { text } = await generateText({
-		model: getModel(),
-		prompt
-	});
-
-	const cleaned = cleanJsonResponse(text);
-
 	try {
-		return JSON.parse(cleaned) as KeywordRelevanceResult[];
-	} catch {
-		console.error('Failed to parse Gemini keyword relevance response:', text);
-		// Fallback: mark all as relevant with low confidence
-		return candidateKeywords.map((k) => ({ keyword: k, isRelevant: true, score: 0.5 }));
+		const { results } = await generateStructured(
+			keywordRelevanceSchema,
+			buildKeywordRelevancePrompt(ctx, candidateKeywords)
+		);
+		// Only accept keywords we asked about (the model may echo them with different casing).
+		const normalize = (k: string) => k.toLowerCase().trim();
+		const candidates = new Set(candidateKeywords.map(normalize));
+		return results
+			.map((r) => ({ ...r, keyword: normalize(r.keyword), score: clamp01(r.score) }))
+			.filter((r) => candidates.has(r.keyword));
+	} catch (err) {
+		if (!(err instanceof MalformedLlmOutputError)) throw err;
+		console.error('Keyword relevance output unusable; no keywords accepted.');
+		return [];
 	}
 }

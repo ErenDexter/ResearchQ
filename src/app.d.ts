@@ -4,7 +4,10 @@ declare global {
 	namespace App {
 		// interface Error {}
 		// interface Locals {}
-		// interface PageData {}
+		interface PageData {
+			/** Project selected in the sidebar (set by the root layout load). */
+			currentProjectId?: string | null;
+		}
 		// interface PageState {}
 		// interface Platform {}
 	}

@@ -15,8 +15,25 @@
 		Save
 	} from 'lucide-svelte';
 	import { page } from '$app/stores';
+	import { screeningDecision, SCREENING_DECISION_LABELS, screeningSourceLabel } from '$lib/screening';
 
 	let paper = $state<any>(null);
+	let savingDecision = $state(false);
+
+	/** Records a manual screening decision (true = include, false = exclude). */
+	async function setDecision(isRelevant: boolean) {
+		savingDecision = true;
+		const res = await fetch(`/api/papers/${paper.id}`, {
+			method: 'PATCH',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ isRelevant })
+		});
+		if (res.ok) {
+			const updated = await res.json();
+			paper = { ...paper, isRelevant: updated.isRelevant, relevanceSource: updated.relevanceSource };
+		}
+		savingDecision = false;
+	}
 	let loading = $state(true);
 	let editing = $state(false);
 	let editForm = $state<any>({});
@@ -83,6 +100,8 @@
 					<Badge variant="success">Relevant</Badge>
 				{:else if paper.isRelevant === false}
 					<Badge variant="destructive">Not relevant</Badge>
+				{:else}
+					<Badge variant="outline">Not screened</Badge>
 				{/if}
 				{#if paper.doi}
 					<a
@@ -164,40 +183,45 @@
 					{#if editing}
 						<div class="space-y-4">
 							<div>
-								<label class="mb-1 block text-xs font-medium text-zinc-500">Summary</label>
+								<label for="editSummary" class="mb-1 block text-xs font-medium text-zinc-500">Summary</label>
 								<textarea
+									id="editSummary"
 									class="w-full rounded border border-zinc-300 px-3 py-2 text-sm"
 									rows="2"
 									bind:value={editForm.summary}
 								></textarea>
 							</div>
 							<div>
-								<label class="mb-1 block text-xs font-medium text-zinc-500">Methodology Summary</label>
+								<label for="editMethodology" class="mb-1 block text-xs font-medium text-zinc-500">Methodology Summary</label>
 								<textarea
+									id="editMethodology"
 									class="w-full rounded border border-zinc-300 px-3 py-2 text-sm"
 									rows="2"
 									bind:value={editForm.methodologySummary}
 								></textarea>
 							</div>
 							<div>
-								<label class="mb-1 block text-xs font-medium text-zinc-500">Target Population</label>
+								<label for="editPopulation" class="mb-1 block text-xs font-medium text-zinc-500">Target Population</label>
 								<input
+									id="editPopulation"
 									type="text"
 									class="w-full rounded border border-zinc-300 px-3 py-2 text-sm"
 									bind:value={editForm.targetPopulation}
 								/>
 							</div>
 							<div>
-								<label class="mb-1 block text-xs font-medium text-zinc-500">Focused Region</label>
+								<label for="editRegion" class="mb-1 block text-xs font-medium text-zinc-500">Focused Region</label>
 								<input
+									id="editRegion"
 									type="text"
 									class="w-full rounded border border-zinc-300 px-3 py-2 text-sm"
 									bind:value={editForm.focusedRegion}
 								/>
 							</div>
 							<div>
-								<label class="mb-1 block text-xs font-medium text-zinc-500">Platform/Domain</label>
+								<label for="editPlatform" class="mb-1 block text-xs font-medium text-zinc-500">Platform/Domain</label>
 								<input
+									id="editPlatform"
 									type="text"
 									class="w-full rounded border border-zinc-300 px-3 py-2 text-sm"
 									bind:value={editForm.platformDomain}
@@ -239,6 +263,31 @@
 
 			<!-- Sidebar -->
 			<div class="space-y-6">
+				<!-- Screening decision -->
+				<Card class="p-5">
+					<h2 class="mb-3 text-sm font-semibold text-zinc-900">Screening</h2>
+					<dl class="space-y-2 text-sm">
+						<div>
+							<dt class="text-xs text-zinc-500">Decision</dt>
+							<dd class="text-zinc-800">{SCREENING_DECISION_LABELS[screeningDecision(paper.isRelevant)]}</dd>
+						</div>
+						{#if paper.isRelevant !== null}
+							<div>
+								<dt class="text-xs text-zinc-500">Decided by</dt>
+								<dd class="text-zinc-800">{screeningSourceLabel(paper.relevanceSource)}</dd>
+							</div>
+						{/if}
+					</dl>
+					<div class="mt-3 flex gap-2">
+						<Button size="sm" variant="outline" disabled={savingDecision || paper.isRelevant === true} onclick={() => setDecision(true)}>
+							Include
+						</Button>
+						<Button size="sm" variant="outline" disabled={savingDecision || paper.isRelevant === false} onclick={() => setDecision(false)}>
+							Exclude
+						</Button>
+					</div>
+				</Card>
+
 				<!-- Keywords -->
 				{#if paper.keywords?.length}
 					<Card class="p-5">

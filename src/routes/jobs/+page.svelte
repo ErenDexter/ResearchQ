@@ -1,15 +1,17 @@
 <script lang="ts">
+	import { getProjectId } from '$lib/current-project';
 	import Card from '$lib/components/ui/Card.svelte';
 	import Badge from '$lib/components/ui/Badge.svelte';
+	import Button from '$lib/components/ui/Button.svelte';
 	import Progress from '$lib/components/ui/Progress.svelte';
-	import { Clock, CheckCircle2, XCircle, Loader2 } from 'lucide-svelte';
+	import { Clock, RefreshCw } from 'lucide-svelte';
 
 	let jobs = $state<any[]>([]);
 	let loading = $state(true);
 
 	async function loadJobs() {
 		loading = true;
-		const res = await fetch('/api/jobs');
+		const res = await fetch(`/api/jobs?projectId=${encodeURIComponent(getProjectId())}`);
 		if (res.ok) {
 			jobs = await res.json();
 		}
@@ -19,6 +21,15 @@
 	$effect(() => {
 		loadJobs();
 	});
+
+	async function retryJob(jobId: string) {
+		const res = await fetch(`/api/jobs/${jobId}`, { method: 'POST' });
+		if (!res.ok) {
+			const data = await res.json().catch(() => ({}));
+			alert(data.error || 'Could not retry this job');
+		}
+		await loadJobs();
+	}
 
 	function getStatusVariant(status: string): 'success' | 'destructive' | 'warning' | 'secondary' {
 		switch (status) {
@@ -51,7 +62,7 @@
 					<div class="flex items-start justify-between">
 						<div class="flex-1 space-y-2">
 							<div class="flex items-center gap-2">
-								<h3 class="text-sm font-semibold text-zinc-900">{job.query}</h3>
+								<h3 class="text-sm font-semibold text-zinc-900">{job.query || "(project keywords)"}</h3>
 								<Badge variant="outline">{job.type}</Badge>
 								<Badge variant={getStatusVariant(job.status)}>{job.status}</Badge>
 							</div>
@@ -81,6 +92,11 @@
 							>
 								View papers →
 							</a>
+						{:else if job.status === 'failed'}
+							<Button variant="outline" size="sm" class="ml-4" onclick={() => retryJob(job.id)}>
+								<RefreshCw class="mr-1 h-3 w-3" />
+								Retry
+							</Button>
 						{/if}
 					</div>
 				</Card>

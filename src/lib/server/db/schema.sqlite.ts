@@ -1,4 +1,4 @@
-import { integer, real, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core';
+import { index, integer, real, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core';
 import { sql } from 'drizzle-orm';
 
 // ─── Projects ──────────────────────────────────────────────────────
@@ -14,10 +14,10 @@ export const projects = sqliteTable('projects', {
 	customPromptContext: text('custom_prompt_context'),
 	createdAt: text('created_at')
 		.notNull()
-		.default(sql`CURRENT_TIMESTAMP`),
+		.default(sql`(CURRENT_TIMESTAMP)`),
 	updatedAt: text('updated_at')
 		.notNull()
-		.default(sql`CURRENT_TIMESTAMP`)
+		.default(sql`(CURRENT_TIMESTAMP)`)
 });
 
 // ─── Project Dimensions ────────────────────────────────────────────
@@ -49,7 +49,7 @@ export const journals = sqliteTable('journals', {
 	focusAreas: text('focus_areas'),
 	createdAt: text('created_at')
 		.notNull()
-		.default(sql`CURRENT_TIMESTAMP`)
+		.default(sql`(CURRENT_TIMESTAMP)`)
 });
 
 // ─── Authors ───────────────────────────────────────────────────────
@@ -63,7 +63,7 @@ export const authors = sqliteTable('authors', {
 	affiliation: text('affiliation'),
 	createdAt: text('created_at')
 		.notNull()
-		.default(sql`CURRENT_TIMESTAMP`)
+		.default(sql`(CURRENT_TIMESTAMP)`)
 });
 
 // ─── Papers ────────────────────────────────────────────────────────
@@ -75,7 +75,7 @@ export const papers = sqliteTable('papers', {
 		.references(() => projects.id, { onDelete: 'cascade' }),
 	title: text('title').notNull(),
 	doi: text('doi'),
-	openalexId: text('openalex_id').unique(),
+	openalexId: text('openalex_id'),
 	abstract: text('abstract'),
 	publicationYear: integer('publication_year'),
 	paperUrl: text('paper_url'),
@@ -85,14 +85,18 @@ export const papers = sqliteTable('papers', {
 	focusedRegion: text('focused_region'),
 	platformDomain: text('platform_domain'),
 	isRelevant: integer('is_relevant', { mode: 'boolean' }),
+	relevanceSource: text('relevance_source'),
 	sourceType: text('source_type'),
 	searchJobId: text('search_job_id'),
 	journalName: text('journal_name'),
 	citedByCount: integer('cited_by_count'),
 	createdAt: text('created_at')
 		.notNull()
-		.default(sql`CURRENT_TIMESTAMP`)
-});
+		.default(sql`(CURRENT_TIMESTAMP)`)
+}, (table) => [
+	uniqueIndex('papers_project_openalex_unique').on(table.projectId, table.openalexId),
+	index('papers_search_job_idx').on(table.searchJobId)
+]);
 
 // ─── Paper ↔ Author ────────────────────────────────────────────────
 export const paperAuthors = sqliteTable('paper_authors', {
@@ -192,7 +196,7 @@ export const searchJobs = sqliteTable('search_jobs', {
 	statusMessage: text('status_message'),
 	createdAt: text('created_at')
 		.notNull()
-		.default(sql`CURRENT_TIMESTAMP`),
+		.default(sql`(CURRENT_TIMESTAMP)`),
 	completedAt: text('completed_at')
 });
 
@@ -213,10 +217,10 @@ export const searchCursors = sqliteTable('search_cursors', {
 		.references(() => searchJobs.id),
 	createdAt: text('created_at')
 		.notNull()
-		.default(sql`CURRENT_TIMESTAMP`),
+		.default(sql`(CURRENT_TIMESTAMP)`),
 	updatedAt: text('updated_at')
 		.notNull()
-		.default(sql`CURRENT_TIMESTAMP`)
+		.default(sql`(CURRENT_TIMESTAMP)`)
 }, (table) => [
 	uniqueIndex('search_cursors_unique').on(table.projectId, table.publisherId, table.searchQuery)
 ]);
@@ -234,7 +238,7 @@ export const jobWorksCache = sqliteTable('job_works_cache', {
 	stored: integer('stored', { mode: 'boolean' }).notNull().default(false),
 	createdAt: text('created_at')
 		.notNull()
-		.default(sql`CURRENT_TIMESTAMP`)
+		.default(sql`(CURRENT_TIMESTAMP)`)
 });
 
 // ─── Search Plans ──────────────────────────────────────────────────
@@ -249,7 +253,7 @@ export const searchPlans = sqliteTable('search_plans', {
 	status: text('status').notNull().default('planning'),
 	createdAt: text('created_at')
 		.notNull()
-		.default(sql`CURRENT_TIMESTAMP`),
+		.default(sql`(CURRENT_TIMESTAMP)`),
 	completedAt: text('completed_at')
 });
 
@@ -272,7 +276,7 @@ export const searchSteps = sqliteTable('search_steps', {
 	relevantFound: integer('relevant_found').notNull().default(0),
 	createdAt: text('created_at')
 		.notNull()
-		.default(sql`CURRENT_TIMESTAMP`)
+		.default(sql`(CURRENT_TIMESTAMP)`)
 });
 
 // ─── Analysis Tags ─────────────────────────────────────────────────
@@ -285,7 +289,9 @@ export const analysisTags = sqliteTable('analysis_tags', {
 		.references(() => papers.id, { onDelete: 'cascade' }),
 	dimension: text('dimension').notNull(),
 	value: text('value').notNull()
-});
+}, (table) => [
+	index('analysis_tags_paper_idx').on(table.paperId)
+]);
 
 // ─── Review Methodologies ──────────────────────────────────────────
 export const reviewMethodologies = sqliteTable('review_methodologies', {
@@ -299,7 +305,7 @@ export const reviewMethodologies = sqliteTable('review_methodologies', {
 	isBuiltIn: integer('is_built_in', { mode: 'boolean' }).notNull().default(true),
 	createdAt: text('created_at')
 		.notNull()
-		.default(sql`CURRENT_TIMESTAMP`)
+		.default(sql`(CURRENT_TIMESTAMP)`)
 });
 
 // ─── Methodology Phases ────────────────────────────────────────────
@@ -333,7 +339,7 @@ export const projectReviews = sqliteTable('project_reviews', {
 	completedAt: text('completed_at'),
 	createdAt: text('created_at')
 		.notNull()
-		.default(sql`CURRENT_TIMESTAMP`)
+		.default(sql`(CURRENT_TIMESTAMP)`)
 });
 
 // ─── Review Phase Progress ─────────────────────────────────────────
@@ -368,5 +374,5 @@ export const reviewOutputs = sqliteTable('review_outputs', {
 	contentMarkdown: text('content_markdown'),
 	generatedAt: text('generated_at')
 		.notNull()
-		.default(sql`CURRENT_TIMESTAMP`)
+		.default(sql`(CURRENT_TIMESTAMP)`)
 });

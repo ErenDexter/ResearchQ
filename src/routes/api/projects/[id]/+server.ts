@@ -50,9 +50,19 @@ export const PATCH: RequestHandler = async ({ params, request }) => {
 	const body = await request.json();
 	const updates: Record<string, unknown> = {};
 
-	if (body.name !== undefined) updates.name = body.name.trim();
-	if (body.description !== undefined) updates.description = body.description.trim();
-	if (body.status !== undefined) updates.status = body.status;
+	for (const field of ['name', 'description'] as const) {
+		if (body[field] === undefined) continue;
+		if (typeof body[field] !== 'string' || !body[field].trim()) {
+			return json({ error: `${field} must be a non-empty string` }, { status: 400 });
+		}
+		updates[field] = body[field].trim();
+	}
+	if (body.status !== undefined) {
+		if (body.status !== 'active' && body.status !== 'archived') {
+			return json({ error: 'status must be "active" or "archived"' }, { status: 400 });
+		}
+		updates.status = body.status;
+	}
 	if (body.relevanceDefinition !== undefined) updates.relevanceDefinition = body.relevanceDefinition;
 	if (body.relevanceCriteria !== undefined)
 		updates.relevanceCriteria =

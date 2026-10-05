@@ -66,7 +66,7 @@ Every AI call goes through `getModel()` in this file. It reads `LLM_PROVIDER`, `
 - **`gateway`** — Vercel AI Gateway (`createGateway`). Model IDs use `<vendor>/<model>` form.
 - **`google`** — Google AI Studio direct (`@ai-sdk/google`). Model IDs are native (no prefix).
 
-The factory normalizes model IDs in both directions so `google/gemini-2.0-flash` and `gemini-2.0-flash` both work regardless of which provider is active.
+The factory normalizes model IDs in both directions so `google/gemini-3.1-flash-lite` and `gemini-3.1-flash-lite` both work regardless of which provider is active.
 
 ### `gemini.ts` — four AI tasks
 
@@ -148,13 +148,18 @@ Here's what happens when a user clicks **Search** on the Topic strategy:
 
 1. The UI POSTs to `/api/jobs` with the strategy, query, and limits.
 2. A `search_jobs` row is inserted with `status='pending'` and `completedPhases=[]`.
-3. The job queue picks up the job. Phase-by-phase:
-   - **search** — `openalex.ts` queries OpenAlex, writes raw results to `job_works_cache`.
-   - **store** — for each cached work, create/find `papers`, `authors`, `journals` rows; link them.
-   - **filter** — batched call to `filterRelevance` in `gemini.ts`; updates `papers.isRelevant`.
-   - **extract** — for each relevant paper, calls `extractMetadata` and `classifyAnalysisFramework`; writes `analysis_tags`.
+3. The job queue (`job-queue.ts`) picks up the job and `jobs.ts` runs it phase-by-phase:
+   - **search** — `openalex.ts` queries OpenAlex, writes raw results to `job_works_cache`. Topic searches use the typed terms, or the project keywords when the query is empty.
+   - **store** — for each cached work, create/find `papers`, `authors`, `journals` rows; link them. Papers are unique per project (`project_id` + `openalex_id`), so several projects can each hold the same work.
+   - **filter** — batched call to `filterRelevance` in `gemini.ts`; sets `papers.isRelevant` and `papers.relevanceSource` (`ai`, `ai_fallback` when the model's output was unusable, `auto_include` when filtering was skipped; `manual` for later edits).
+   - **extract** — for each relevant paper, calls `extractMetadata` and `classifyAnalysisFramework`; writes `analysis_tags`, then the summary last (a non-null summary marks the paper done).
    - **keywords** — calls `evaluateKeywordRelevance` on extracted keywords; adds accepted ones to `project_keywords`.
-4. On success, `search_jobs.status='completed'`, `completedAt` set. On failure, `status='failed'` with `error` populated; retry resumes from `lastPhase`.
+4. On success, `search_jobs.status='completed'`, `completedAt` set. On failure, `status='failed'` with `error` populated. API/network errors fail the job rather than guessing; retry resumes from the last completed phase and only processes unfinished papers.
+5. The queue is in memory. At startup (`hooks.server.ts` → `recoverInterruptedJobs`), jobs that never started are queued again and jobs that were mid-run are marked failed, so they can be retried.
+
+All LLM calls go through `generateStructured` in `llm.ts`, which uses schema-validated structured output (zod) and distinguishes malformed model output (handled per call site) from API failures (propagated).
+
+The project selected in the sidebar is stored in a `currentProjectId` cookie. The root layout load resolves it (falling back to the newest active project) and exposes it to pages; API routes accept an explicit `projectId` and otherwise use the same cookie.
 
 Every one of those steps is logged and persisted — which is what makes the review reproducible.
 
@@ -166,7 +171,7 @@ Every one of those steps is logged and persisted — which is what makes the rev
 |---|---|
 | A new review methodology | [src/lib/server/db/seed-methodologies.ts](../src/lib/server/db/seed-methodologies.ts) — append to `METHODOLOGIES` |
 | A new review output type | [src/lib/server/literature-review.ts](../src/lib/server/literature-review.ts) — `OUTPUT_TYPE_REGISTRY` + generator fn |
-| A new search strategy | [src/lib/server/openalex.ts](../src/lib/server/openalex.ts) — add a function + call site in the jobs route |
+| A new search strategy | [src/lib/server/openalex.ts](../src/lib/server/openalex.ts) — add a function, then a branch in [jobs.ts](../src/lib/server/jobs.ts) and an entry in `SEARCH_TYPES` |
 | A new LLM provider | [src/lib/server/llm.ts](../src/lib/server/llm.ts) — add a branch to `getModel()` |
 | A new analysis dimension for a specific project | UI: `/projects/<id>/settings` (no code changes — dimensions are per-project data) |
 | A new column on an existing table | Update **both** [schema.sqlite.ts](../src/lib/server/db/schema.sqlite.ts) and [schema.pg.ts](../src/lib/server/db/schema.pg.ts) in lockstep, then `pnpm db:push` |

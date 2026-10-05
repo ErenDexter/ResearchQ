@@ -13,10 +13,13 @@ The authoritative machine-readable reference is [.env.example](../.env.example) 
 | `DB_DIALECT` | `sqlite` or `postgres` | `sqlite` | No |
 | `DATABASE_URL` | SQLite file path **or** Postgres connection string | `./data/researchq.db` | No |
 | `LLM_PROVIDER` | `gateway` or `google` | `gateway` | No |
-| `LLM` | Gemini model identifier | `google/gemini-2.0-flash` | No |
+| `LLM` | Gemini model identifier | `google/gemini-3.1-flash-lite` | No |
 | `AI_GATEWAY_KEY` | Vercel AI Gateway API key | — | Yes (gateway mode) |
 | `GOOGLE_GENERATIVE_AI_API_KEY` | Google AI Studio API key | — | Yes (google mode) |
 | `OPENALEX_EMAIL` | Your email for the OpenAlex "polite pool" | — | Recommended |
+| `OPENALEX_API_KEY` | OpenAlex premium API key | — | No |
+| `AUTH_USERNAME` / `AUTH_PASSWORD` | HTTP Basic auth for the whole app (both must be set) | — | Yes, if internet-facing |
+| `ALLOWED_HOSTS` | Extra hostnames the dev server accepts (comma-separated) | — | No |
 
 ---
 
@@ -52,6 +55,8 @@ Meaning depends on `DB_DIALECT`.
 
 Both are safe to re-run. `drizzle-kit` computes a diff between your schema files and the live database and applies only the differences.
 
+**After upgrading ResearchQ, re-run the push command** — new releases can add columns or indexes. For example, the release that made papers unique *per project* (so two projects can both contain the same paper) drops the old global unique index on `papers.openalex_id`, adds a `(project_id, openalex_id)` unique index and a `relevance_source` column. Existing data is kept.
+
 ### Changing schema during development
 
 1. Edit **both** [schema.sqlite.ts](../src/lib/server/db/schema.sqlite.ts) and [schema.pg.ts](../src/lib/server/db/schema.pg.ts) — keep them in lockstep.
@@ -83,14 +88,15 @@ Both produce equivalent results for ResearchQ's workloads.
 
 The Gemini model identifier. The `google/` prefix is optional — the tool adds or strips it to match the active provider.
 
-Reasonable choices:
+Reasonable choices (as of October 2026 — Google adds and retires models regularly):
 
-- `gemini-2.0-flash` (default) — fast, cheap, good enough for screening and extraction.
-- `gemini-2.5-flash` — newer; higher quality on complex prompts, still fast.
-- `gemini-2.5-pro` — highest quality, slower, more expensive; use when screening precision really matters.
-- `gemini-1.5-flash`, `gemini-1.5-pro` — older but still fully supported.
+- `gemini-3.1-flash-lite` (default) — fast and cheapest; good enough for screening and extraction.
+- `gemini-3.8-flash` — higher quality on complex prompts (synthesis outputs), still fast, several times the price.
+- `gemini-pro-latest` — highest quality, slower and much more expensive; use when screening precision really matters.
 
-**Recommendation:** start with `gemini-2.0-flash` for everything. Once you have some output to evaluate, try `gemini-2.5-pro` on relevance screening if the AI is making too many wrong calls.
+**Recommendation:** start with the default for everything. Once you have some output to evaluate, try a stronger model on relevance screening if the AI is making too many wrong calls.
+
+**Retired models.** Google shuts down older models (`gemini-2.0-flash` is gone, and the 2.5 family is no longer offered to new API keys). If AI calls fail with *"This model … is no longer available"*, the message names the replacement — set `LLM` to it and restart. The `*-latest` aliases (`gemini-flash-lite-latest`, `gemini-flash-latest`) are kept pointing at a current model, so they avoid this, but the model behind them — and its behaviour and price — can change without notice, which matters for a reproducible review.
 
 You can change the model any time — set it, restart the server, and subsequent AI calls use the new model. Past extractions are not re-run automatically.
 
@@ -111,6 +117,24 @@ Optional but recommended. OpenAlex operates two request pools:
 
 Set `OPENALEX_EMAIL=you@example.com`. OpenAlex uses it only to contact you if your traffic pattern looks like abuse — they don't spam, newsletter, or sell it. See their [rate-limit docs](https://docs.openalex.org/how-to-use-the-api/rate-limits-and-authentication).
 
+### `OPENALEX_API_KEY`
+
+Optional. If you have an OpenAlex premium key, set it here and it is sent as the `api_key` parameter on every request.
+
+---
+
+## Access control
+
+### `AUTH_USERNAME` / `AUTH_PASSWORD`
+
+ResearchQ has no user accounts. When **both** variables are set, every page and API request requires HTTP Basic auth with these credentials (the browser shows a login prompt once and then remembers it). When either is empty, the app is open to anyone who can reach it.
+
+- **Local, single-user:** leave them empty.
+- **Anything reachable from the internet** (Diploi, a VPS, a shared lab server): set both. Without them, anyone with the URL can read your data, delete projects and spend your LLM quota.
+- Always serve Basic auth over HTTPS — the credentials are only base64-encoded. Diploi and most reverse proxies terminate TLS for you.
+
+For institutional SSO or per-user accounts, put ResearchQ behind an auth proxy (oauth2-proxy, Caddy, Authelia) instead.
+
 ---
 
 ## Common configurations
@@ -130,7 +154,7 @@ That's it. SQLite + the default model + OpenAlex polite pool — works out of th
 ```env
 LLM_PROVIDER=google
 GOOGLE_GENERATIVE_AI_API_KEY=...
-LLM=gemini-2.5-flash
+LLM=gemini-3.1-flash-lite
 OPENALEX_EMAIL=you@example.com
 ```
 
@@ -142,14 +166,16 @@ DATABASE_URL=postgresql://user:password@db.example.com:5432/researchq?sslmode=re
 LLM_PROVIDER=gateway
 AI_GATEWAY_KEY=vck_...
 OPENALEX_EMAIL=team@example.com
+AUTH_USERNAME=team
+AUTH_PASSWORD=a-long-random-password
 ```
 
-Behind a reverse proxy, terminate TLS at the proxy and keep the Node process on localhost. The tool does not implement authentication — if you're deploying publicly, put it behind an auth layer (oauth2-proxy, Caddy with basic auth, institutional SSO, etc.).
+Behind a reverse proxy, terminate TLS at the proxy and keep the Node process on localhost. ResearchQ has no per-user accounts — set `AUTH_USERNAME`/`AUTH_PASSWORD` for a shared login, or put it behind an auth layer (oauth2-proxy, institutional SSO, etc.).
 
 ### Higher precision at higher cost
 
 ```env
-LLM=gemini-2.5-pro
+LLM=gemini-pro-latest
 ```
 
 Use when you're doing a critical review and want to trade speed for screening precision. A 500-paper topic search goes from ~40 seconds to a few minutes, and AI call cost rises accordingly.

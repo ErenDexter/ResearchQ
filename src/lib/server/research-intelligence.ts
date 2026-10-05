@@ -2,8 +2,8 @@
  * Research Intelligence — gap analysis, trends, author networks, duplicates.
  */
 
-import { generateText } from 'ai';
-import { getModel } from './llm';
+import { z } from 'zod';
+import { generateStructured } from './llm';
 import { db } from './db';
 import {
 	papers,
@@ -13,7 +13,7 @@ import {
 	keywords,
 	analysisTags
 } from './db/schema';
-import { eq, and, sql, desc } from 'drizzle-orm';
+import { eq, and, desc, count, countDistinct, inArray } from 'drizzle-orm';
 import { loadPromptContext } from './project-context';
 
 // ─── Author Network ────────────────────────────────────────────────
@@ -33,84 +33,92 @@ export interface CoAuthorPair {
 }
 
 export async function analyzeAuthorNetwork(projectId: string) {
+	const included = and(eq(papers.projectId, projectId), eq(papers.isRelevant, true));
+
 	// Prolific authors
 	const prolificAuthors = await db
 		.select({
 			id: authors.id,
 			name: authors.name,
 			affiliation: authors.affiliation,
-			paperCount: sql<number>`COUNT(DISTINCT ${papers.id})`
+			paperCount: countDistinct(papers.id)
 		})
 		.from(paperAuthors)
 		.innerJoin(authors, eq(paperAuthors.authorId, authors.id))
 		.innerJoin(papers, eq(paperAuthors.paperId, papers.id))
-		.where(and(eq(papers.projectId, projectId), eq(papers.isRelevant, true)))
+		.where(included)
 		.groupBy(authors.id)
-		.orderBy(desc(sql`COUNT(DISTINCT ${papers.id})`))
+		.orderBy(desc(countDistinct(papers.id)), authors.name)
 		.limit(20);
 
-	// Get top keywords for each prolific author
-	const authorStats: AuthorStats[] = await Promise.all(
-		prolificAuthors.map(async (a) => {
-			const topKws = await db
-				.select({ term: keywords.term, count: sql<number>`COUNT(*)` })
-				.from(paperKeywords)
-				.innerJoin(keywords, eq(paperKeywords.keywordId, keywords.id))
-				.innerJoin(paperAuthors, eq(paperAuthors.paperId, paperKeywords.paperId))
-				.innerJoin(papers, eq(papers.id, paperKeywords.paperId))
-				.where(
-					and(
-						eq(paperAuthors.authorId, a.id),
-						eq(papers.projectId, projectId)
+	// Top keywords for the prolific authors, in one query
+	const keywordRows =
+		prolificAuthors.length === 0
+			? []
+			: await db
+					.select({ authorId: paperAuthors.authorId, term: keywords.term, n: count() })
+					.from(paperKeywords)
+					.innerJoin(keywords, eq(paperKeywords.keywordId, keywords.id))
+					.innerJoin(paperAuthors, eq(paperAuthors.paperId, paperKeywords.paperId))
+					.innerJoin(papers, eq(papers.id, paperKeywords.paperId))
+					.where(
+						and(
+							eq(papers.projectId, projectId),
+							inArray(paperAuthors.authorId, prolificAuthors.map((a) => a.id))
+						)
 					)
-				)
-				.groupBy(keywords.term)
-				.orderBy(desc(sql`COUNT(*)`))
-				.limit(5);
+					.groupBy(paperAuthors.authorId, keywords.term)
+					.orderBy(desc(count()), keywords.term);
 
-			return {
-				...a,
-				topKeywords: topKws.map((k) => k.term)
-			};
-		})
-	);
-
-	// Co-authorship pairs
-	const coAuthorPairs: CoAuthorPair[] = [];
-	// Simple approach: for papers with multiple authors, find pairs
-	const projectPapers = await db
-		.select({ id: papers.id })
-		.from(papers)
-		.where(and(eq(papers.projectId, projectId), eq(papers.isRelevant, true)));
-
-	const paperAuthorMap = new Map<string, string[]>();
-	for (const p of projectPapers) {
-		const authorList = await db
-			.select({ name: authors.name })
-			.from(paperAuthors)
-			.innerJoin(authors, eq(paperAuthors.authorId, authors.id))
-			.where(eq(paperAuthors.paperId, p.id));
-		paperAuthorMap.set(p.id, authorList.map((a) => a.name));
+	const topKeywordsByAuthor = new Map<string, string[]>();
+	for (const row of keywordRows) {
+		const list = topKeywordsByAuthor.get(row.authorId) ?? [];
+		if (list.length < 5) list.push(row.term);
+		topKeywordsByAuthor.set(row.authorId, list);
 	}
 
-	// Count co-occurrences
+	const authorStats: AuthorStats[] = prolificAuthors.map((a) => ({
+		...a,
+		topKeywords: topKeywordsByAuthor.get(a.id) ?? []
+	}));
+
+	// Co-authorship pairs from one query of (paper, author) rows
+	const authorshipRows = await db
+		.select({ paperId: paperAuthors.paperId, name: authors.name })
+		.from(paperAuthors)
+		.innerJoin(authors, eq(paperAuthors.authorId, authors.id))
+		.innerJoin(papers, eq(paperAuthors.paperId, papers.id))
+		.where(included);
+
+	const paperAuthorMap = new Map<string, string[]>();
+	for (const row of authorshipRows) {
+		const list = paperAuthorMap.get(row.paperId) ?? [];
+		list.push(row.name);
+		paperAuthorMap.set(row.paperId, list);
+	}
+
+	return { authors: authorStats, coAuthorPairs: topCoAuthorPairs(paperAuthorMap.values(), 20) };
+}
+
+export function topCoAuthorPairs(authorLists: Iterable<string[]>, limit: number): CoAuthorPair[] {
 	const pairCounts = new Map<string, number>();
-	for (const authorNames of paperAuthorMap.values()) {
-		for (let i = 0; i < authorNames.length; i++) {
-			for (let j = i + 1; j < authorNames.length; j++) {
-				const key = [authorNames[i], authorNames[j]].sort().join('|||');
+	for (const names of authorLists) {
+		const unique = [...new Set(names)];
+		for (let i = 0; i < unique.length; i++) {
+			for (let j = i + 1; j < unique.length; j++) {
+				const key = [unique[i], unique[j]].sort().join('|||');
 				pairCounts.set(key, (pairCounts.get(key) || 0) + 1);
 			}
 		}
 	}
 
-	// Top co-author pairs
-	for (const [key, count] of [...pairCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 20)) {
-		const [a1, a2] = key.split('|||');
-		coAuthorPairs.push({ author1: a1, author2: a2, sharedPapers: count });
-	}
-
-	return { authors: authorStats, coAuthorPairs };
+	return [...pairCounts.entries()]
+		.sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+		.slice(0, limit)
+		.map(([key, sharedPapers]) => {
+			const [author1, author2] = key.split('|||');
+			return { author1, author2, sharedPapers };
+		});
 }
 
 // ─── Trend Analysis ────────────────────────────────────────────────
@@ -121,13 +129,15 @@ export interface TrendData {
 }
 
 export async function analyzeTrends(projectId: string): Promise<TrendData> {
+	const included = and(eq(papers.projectId, projectId), eq(papers.isRelevant, true));
+
 	const yearlyPaperCounts = await db
 		.select({
 			year: papers.publicationYear,
-			count: sql<number>`COUNT(*)`
+			count: count()
 		})
 		.from(papers)
-		.where(and(eq(papers.projectId, projectId), eq(papers.isRelevant, true)))
+		.where(included)
 		.groupBy(papers.publicationYear)
 		.orderBy(papers.publicationYear);
 
@@ -135,88 +145,94 @@ export async function analyzeTrends(projectId: string): Promise<TrendData> {
 	const topKeywords = await db
 		.select({
 			term: keywords.term,
-			count: sql<number>`COUNT(*)`
+			count: count()
 		})
 		.from(paperKeywords)
 		.innerJoin(keywords, eq(paperKeywords.keywordId, keywords.id))
 		.innerJoin(papers, eq(papers.id, paperKeywords.paperId))
-		.where(and(eq(papers.projectId, projectId), eq(papers.isRelevant, true)))
+		.where(included)
 		.groupBy(keywords.term)
-		.orderBy(desc(sql`COUNT(*)`))
+		.orderBy(desc(count()), keywords.term)
 		.limit(10);
 
-	const keywordTrends = await Promise.all(
-		topKeywords.map(async (kw) => {
-			const years = await db
-				.select({
-					year: papers.publicationYear,
-					count: sql<number>`COUNT(*)`
-				})
-				.from(paperKeywords)
-				.innerJoin(keywords, eq(paperKeywords.keywordId, keywords.id))
-				.innerJoin(papers, eq(papers.id, paperKeywords.paperId))
-				.where(
-					and(
-						eq(papers.projectId, projectId),
-						eq(keywords.term, kw.term),
-						eq(papers.isRelevant, true)
-					)
-				)
-				.groupBy(papers.publicationYear)
-				.orderBy(papers.publicationYear);
+	const yearRows =
+		topKeywords.length === 0
+			? []
+			: await db
+					.select({
+						term: keywords.term,
+						year: papers.publicationYear,
+						count: count()
+					})
+					.from(paperKeywords)
+					.innerJoin(keywords, eq(paperKeywords.keywordId, keywords.id))
+					.innerJoin(papers, eq(papers.id, paperKeywords.paperId))
+					.where(and(included, inArray(keywords.term, topKeywords.map((k) => k.term))))
+					.groupBy(keywords.term, papers.publicationYear)
+					.orderBy(papers.publicationYear);
 
-			return {
-				keyword: kw.term,
-				years: years.map((y) => ({ year: y.year!, count: y.count }))
-			};
-		})
-	);
+	const keywordTrends = topKeywords.map((kw) => ({
+		keyword: kw.term,
+		years: yearRows
+			.filter((r) => r.term === kw.term && r.year !== null)
+			.map((r) => ({ year: r.year!, count: r.count }))
+	}));
 
 	return {
 		keywordTrends,
-		yearlyPaperCounts: yearlyPaperCounts.map((y) => ({ year: y.year!, count: y.count }))
+		yearlyPaperCounts: yearlyPaperCounts
+			.filter((y) => y.year !== null)
+			.map((y) => ({ year: y.year!, count: y.count }))
 	};
 }
 
 // ─── Gap Analysis (LLM-powered) ───────────────────────────────────
+
+const gapSchema = z.object({
+	gaps: z.array(z.string()),
+	suggestions: z.array(z.string())
+});
 
 export async function analyzeGaps(projectId: string): Promise<{
 	gaps: string[];
 	suggestions: string[];
 }> {
 	const ctx = await loadPromptContext(projectId);
+	const included = and(eq(papers.projectId, projectId), eq(papers.isRelevant, true));
 
 	// Gather corpus summary
 	const byRegion = await db
-		.select({ region: papers.focusedRegion, count: sql<number>`COUNT(*)` })
+		.select({ region: papers.focusedRegion, count: count() })
 		.from(papers)
-		.where(and(eq(papers.projectId, projectId), eq(papers.isRelevant, true)))
+		.where(included)
 		.groupBy(papers.focusedRegion)
-		.orderBy(desc(sql`COUNT(*)`))
+		.orderBy(desc(count()))
 		.limit(10);
 
+	if (byRegion.length === 0) return { gaps: [], suggestions: [] };
+
 	const byPlatform = await db
-		.select({ platform: papers.platformDomain, count: sql<number>`COUNT(*)` })
+		.select({ platform: papers.platformDomain, count: count() })
 		.from(papers)
-		.where(and(eq(papers.projectId, projectId), eq(papers.isRelevant, true)))
+		.where(included)
 		.groupBy(papers.platformDomain)
-		.orderBy(desc(sql`COUNT(*)`))
+		.orderBy(desc(count()))
 		.limit(10);
 
 	const byYear = await db
-		.select({ year: papers.publicationYear, count: sql<number>`COUNT(*)` })
+		.select({ year: papers.publicationYear, count: count() })
 		.from(papers)
-		.where(and(eq(papers.projectId, projectId), eq(papers.isRelevant, true)))
+		.where(included)
 		.groupBy(papers.publicationYear)
 		.orderBy(papers.publicationYear);
 
 	const topTags = await db
-		.select({ dimension: analysisTags.dimension, value: analysisTags.value, count: sql<number>`COUNT(*)` })
+		.select({ dimension: analysisTags.dimension, value: analysisTags.value, count: count() })
 		.from(analysisTags)
 		.innerJoin(papers, eq(papers.id, analysisTags.paperId))
-		.where(eq(papers.projectId, projectId))
+		.where(included)
 		.groupBy(analysisTags.dimension, analysisTags.value)
-		.orderBy(desc(sql`COUNT(*)`))
+		.orderBy(desc(count()))
 		.limit(30);
 
 	const corpusSummary = `
@@ -231,7 +247,9 @@ Coverage summary:
 `;
 
 	try {
-		const prompt = `You are a research methodology expert analyzing the coverage of a systematic literature review.
+		return await generateStructured(
+			gapSchema,
+			`You are a research methodology expert analyzing the coverage of a systematic literature review.
 
 ${corpusSummary}
 
@@ -239,20 +257,8 @@ Based on this corpus, identify:
 1. "gaps": 3-5 under-researched areas, geographic blind spots, missing methodologies, or temporal gaps
 2. "suggestions": 3-5 actionable suggestions for expanding the review (new search terms, venues, authors to investigate)
 
-Respond ONLY with a valid JSON object with these two arrays of strings. No other text.`;
-
-		const { text } = await generateText({
-			model: getModel(),
-			prompt
-		});
-
-		const cleaned = text.trim().replace(/^```json?\s*/, '').replace(/```\s*$/, '');
-		const result = JSON.parse(cleaned);
-
-		return {
-			gaps: result.gaps || [],
-			suggestions: result.suggestions || []
-		};
+Respond ONLY with a JSON object with these two arrays of strings. No other text.`
+		);
 	} catch (e) {
 		console.error('Gap analysis failed:', e);
 		return { gaps: [], suggestions: [] };
@@ -267,45 +273,86 @@ export interface DuplicatePair {
 	similarity: number;
 }
 
+/** Normalized title tokens: letters/digits in any script, words longer than 2 characters. */
+export function titleTokens(title: string): string[] {
+	return [
+		...new Set(
+			title
+				.normalize('NFKC')
+				.toLowerCase()
+				.replace(/[^\p{L}\p{N}\s]/gu, ' ')
+				.split(/\s+/)
+				.filter((w) => w.length > 2)
+		)
+	];
+}
+
+/**
+ * Finds pairs of titles with Jaccard similarity ≥ threshold.
+ *
+ * Uses prefix filtering (as in the AllPairs algorithm): with tokens ordered
+ * rarest-first, two sets can only reach the threshold if they share a token
+ * within their first |set| − ⌈threshold·|set|⌉ + 1 tokens. Only those
+ * candidate pairs are compared, instead of every pair.
+ */
+export function findSimilarTitles<T extends { id: string; title: string }>(
+	items: T[],
+	threshold = 0.85
+): DuplicatePair[] {
+	const tokenSets = items.map((p) => titleTokens(p.title));
+
+	const frequency = new Map<string, number>();
+	for (const tokens of tokenSets) for (const t of tokens) frequency.set(t, (frequency.get(t) ?? 0) + 1);
+	const order = (a: string, b: string) => (frequency.get(a)! - frequency.get(b)!) || (a < b ? -1 : a > b ? 1 : 0);
+	for (const tokens of tokenSets) tokens.sort(order);
+
+	const sets = tokenSets.map((tokens) => new Set(tokens));
+	const index = new Map<string, number[]>();
+	const duplicates: DuplicatePair[] = [];
+
+	for (let i = 0; i < items.length; i++) {
+		const tokens = tokenSets[i];
+		if (tokens.length === 0) continue;
+		// (epsilon guards against float error, e.g. 0.85 * 100 = 85.00000000000001)
+		const prefixLength = tokens.length - Math.ceil(threshold * tokens.length - 1e-9) + 1;
+		const candidates = new Set<number>();
+
+		for (const token of tokens.slice(0, prefixLength)) {
+			for (const j of index.get(token) ?? []) candidates.add(j);
+		}
+
+		for (const j of candidates) {
+			const a = sets[i];
+			const b = sets[j];
+			// Size filter: Jaccard can't reach the threshold if sizes differ too much.
+			if (Math.min(a.size, b.size) < threshold * Math.max(a.size, b.size) - 1e-9) continue;
+			let intersection = 0;
+			for (const t of a) if (b.has(t)) intersection++;
+			const similarity = intersection / (a.size + b.size - intersection);
+			if (similarity >= threshold - 1e-9) {
+				duplicates.push({
+					paper1: { id: items[j].id, title: items[j].title },
+					paper2: { id: items[i].id, title: items[i].title },
+					similarity: Math.round(similarity * 100) / 100
+				});
+			}
+		}
+
+		for (const token of tokens.slice(0, prefixLength)) {
+			const list = index.get(token) ?? [];
+			list.push(i);
+			index.set(token, list);
+		}
+	}
+
+	return duplicates.sort((a, b) => b.similarity - a.similarity);
+}
+
 export async function findDuplicates(projectId: string): Promise<DuplicatePair[]> {
 	const allPapers = await db
 		.select({ id: papers.id, title: papers.title })
 		.from(papers)
 		.where(eq(papers.projectId, projectId));
 
-	const duplicates: DuplicatePair[] = [];
-
-	// Jaccard similarity on word sets
-	function wordSet(title: string): Set<string> {
-		return new Set(
-			title
-				.toLowerCase()
-				.replace(/[^a-z0-9\s]/g, '')
-				.split(/\s+/)
-				.filter((w) => w.length > 2)
-		);
-	}
-
-	function jaccard(a: Set<string>, b: Set<string>): number {
-		const intersection = new Set([...a].filter((x) => b.has(x)));
-		const union = new Set([...a, ...b]);
-		return union.size === 0 ? 0 : intersection.size / union.size;
-	}
-
-	const wordSets = allPapers.map((p) => ({ ...p, words: wordSet(p.title) }));
-
-	for (let i = 0; i < wordSets.length; i++) {
-		for (let j = i + 1; j < wordSets.length; j++) {
-			const sim = jaccard(wordSets[i].words, wordSets[j].words);
-			if (sim >= 0.85) {
-				duplicates.push({
-					paper1: { id: wordSets[i].id, title: wordSets[i].title },
-					paper2: { id: wordSets[j].id, title: wordSets[j].title },
-					similarity: Math.round(sim * 100) / 100
-				});
-			}
-		}
-	}
-
-	return duplicates.sort((a, b) => b.similarity - a.similarity);
+	return findSimilarTitles(allPapers);
 }

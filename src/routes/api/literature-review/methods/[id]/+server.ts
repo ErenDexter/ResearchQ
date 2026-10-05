@@ -30,12 +30,19 @@ export const GET: RequestHandler = async ({ params }) => {
 
 export const PATCH: RequestHandler = async ({ params, request }) => {
 	const body = await request.json();
-	const updates: Record<string, unknown> = {};
+	const updates: Record<string, string> = {};
 
-	if (body.name !== undefined) updates.name = body.name.trim();
-	if (body.description !== undefined) updates.description = body.description.trim();
-	if (body.type !== undefined) updates.type = body.type;
-	if (body.domain !== undefined) updates.domain = body.domain;
+	for (const field of ['name', 'description', 'type', 'domain'] as const) {
+		if (body[field] === undefined) continue;
+		if (typeof body[field] !== 'string') {
+			return json({ error: `${field} must be a string` }, { status: 400 });
+		}
+		updates[field] = body[field].trim();
+	}
+
+	if (Object.keys(updates).length === 0) {
+		return json({ error: 'No valid fields to update' }, { status: 400 });
+	}
 
 	await db.update(reviewMethodologies).set(updates).where(eq(reviewMethodologies.id, params.id));
 

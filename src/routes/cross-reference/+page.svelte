@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { getProjectId } from '$lib/current-project';
 	import { onMount } from 'svelte';
 	import Card from '$lib/components/ui/Card.svelte';
 	import Button from '$lib/components/ui/Button.svelte';
@@ -48,28 +49,14 @@
 	const limit = 30;
 
 	let projectIdMissing = $state(false);
-
-	function getProjectId(): string {
-		if (typeof window === 'undefined') return '';
-		return (window as any).__currentProjectId || localStorage.getItem('currentProjectId') || '';
-	}
-
-	async function waitForProjectId(maxAttempts = 20, delayMs = 50): Promise<string> {
-		for (let i = 0; i < maxAttempts; i++) {
-			const id = getProjectId();
-			if (id) return id;
-			await new Promise((r) => setTimeout(r, delayMs));
-		}
-		return '';
-	}
+	let loadError = $state('');
 
 	async function loadData() {
 		loading = true;
-		const projectId = await waitForProjectId();
-		console.log('[cross-reference] resolved projectId:', projectId);
+		loadError = '';
+		const projectId = getProjectId();
 
 		if (!projectId) {
-			console.warn('[cross-reference] no project ID available after waiting');
 			projectIdMissing = true;
 			loading = false;
 			return;
@@ -104,16 +91,19 @@
 		if (databaseFilter) params.set('database', databaseFilter);
 		if (keywordFilter) params.set('keyword', keywordFilter);
 
-		const url = `/api/projects/${projectId}/cross-reference?${params.toString()}`;
-		console.log('[cross-reference] fetching:', url);
-
-		const res = await fetch(url);
-		const data = await res.json();
-		console.log('[cross-reference] response: total=', data.total, 'papers=', data.papers?.length);
-
-		papers = data.papers || [];
-		total = data.total || 0;
-		loading = false;
+		try {
+			const res = await fetch(`/api/projects/${projectId}/cross-reference?${params.toString()}`);
+			const data = await res.json().catch(() => ({}));
+			if (!res.ok) throw new Error(data.error || data.message || `Request failed (${res.status})`);
+			papers = data.papers || [];
+			total = data.total || 0;
+		} catch (e) {
+			papers = [];
+			total = 0;
+			loadError = e instanceof Error ? e.message : 'Failed to load papers';
+		} finally {
+			loading = false;
+		}
 	}
 
 	onMount(loadData);
@@ -178,24 +168,24 @@
 	<Card class="p-4">
 		<div class="flex flex-wrap items-end gap-3">
 			<div class="flex-1 min-w-[200px]">
-				<label class="text-xs font-medium text-zinc-500 mb-1 block">Search</label>
-				<Input bind:value={searchQuery} placeholder="Search titles..." />
+				<label for="xrefSearch" class="text-xs font-medium text-zinc-500 mb-1 block">Search</label>
+				<Input id="xrefSearch" bind:value={searchQuery} placeholder="Search titles..." />
 			</div>
 			<div class="w-24">
-				<label class="text-xs font-medium text-zinc-500 mb-1 block">Year from</label>
-				<Input bind:value={yearMin} placeholder="2016" type="number" />
+				<label for="xrefYearMin" class="text-xs font-medium text-zinc-500 mb-1 block">Year from</label>
+				<Input id="xrefYearMin" bind:value={yearMin} placeholder="2016" type="number" />
 			</div>
 			<div class="w-24">
-				<label class="text-xs font-medium text-zinc-500 mb-1 block">Year to</label>
-				<Input bind:value={yearMax} placeholder="2026" type="number" />
+				<label for="xrefYearMax" class="text-xs font-medium text-zinc-500 mb-1 block">Year to</label>
+				<Input id="xrefYearMax" bind:value={yearMax} placeholder="2026" type="number" />
 			</div>
 			<div class="w-36">
-				<label class="text-xs font-medium text-zinc-500 mb-1 block">Region</label>
-				<Input bind:value={regionFilter} placeholder="e.g., United States" />
+				<label for="xrefRegion" class="text-xs font-medium text-zinc-500 mb-1 block">Region</label>
+				<Input id="xrefRegion" bind:value={regionFilter} placeholder="e.g., United States" />
 			</div>
 			<div class="w-36">
-				<label class="text-xs font-medium text-zinc-500 mb-1 block">Platform</label>
-				<Input bind:value={platformFilter} placeholder="e.g., Healthcare" />
+				<label for="xrefPlatform" class="text-xs font-medium text-zinc-500 mb-1 block">Platform</label>
+				<Input id="xrefPlatform" bind:value={platformFilter} placeholder="e.g., Healthcare" />
 			</div>
 			<div class="w-44">
 				<label for="databaseFilter" class="text-xs font-medium text-zinc-500 mb-1 block">Database</label>
@@ -211,8 +201,8 @@
 				</select>
 			</div>
 			<div class="w-40">
-				<label class="text-xs font-medium text-zinc-500 mb-1 block">Keyword</label>
-				<Input bind:value={keywordFilter} placeholder="e.g., fairness" />
+				<label for="xrefKeyword" class="text-xs font-medium text-zinc-500 mb-1 block">Keyword</label>
+				<Input id="xrefKeyword" bind:value={keywordFilter} placeholder="e.g., fairness" />
 			</div>
 			<Button onclick={applyFilters}>
 				<Filter class="mr-2 h-4 w-4" />
@@ -228,6 +218,8 @@
 		<p class="text-sm text-zinc-500 py-8 text-center">
 			No project selected. Pick a project from the sidebar dropdown.
 		</p>
+	{:else if loadError}
+		<p class="text-sm text-red-600 py-8 text-center">Could not load papers: {loadError}</p>
 	{:else if papers.length === 0 && total === 0 && !searchQuery && !yearMin && !yearMax && !regionFilter && !platformFilter && !databaseFilter && !keywordFilter}
 		<p class="text-sm text-zinc-500 py-8 text-center">
 			This project has no papers yet. <a href="/search" class="text-zinc-900 font-medium hover:underline">Run a search</a> to get started.

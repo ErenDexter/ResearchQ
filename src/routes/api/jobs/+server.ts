@@ -1,41 +1,51 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { db } from '$lib/server/db';
-import { searchJobs } from '$lib/server/db/schema';
-import { desc, eq, and } from 'drizzle-orm';
+import { projects, searchJobs } from '$lib/server/db/schema';
+import { desc, eq } from 'drizzle-orm';
 import { jobQueue } from '$lib/server/job-queue';
-import { getDefaultProjectId } from '$lib/server/project-context';
+import { OPTIONAL_QUERY_TYPES, SEARCH_TYPES, type SearchType } from '$lib/server/jobs';
+import { resolveProjectId } from '$lib/server/project-context';
 
-export const GET: RequestHandler = async ({ url }) => {
-	const projectId = url.searchParams.get('projectId') || (await getDefaultProjectId());
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
-	const conditions = [];
-	if (projectId) {
-		conditions.push(eq(searchJobs.projectId, projectId));
-	}
+export const GET: RequestHandler = async ({ url, cookies }) => {
+	const projectId = await resolveProjectId(url.searchParams.get('projectId'), cookies);
 
-	const where = conditions.length > 0 ? and(...conditions) : undefined;
-	const jobs = await db.select().from(searchJobs).where(where).orderBy(desc(searchJobs.createdAt));
+	const jobs = await db
+		.select()
+		.from(searchJobs)
+		.where(projectId ? eq(searchJobs.projectId, projectId) : undefined)
+		.orderBy(desc(searchJobs.createdAt));
 	return json(jobs);
 };
 
-export const POST: RequestHandler = async ({ request }) => {
+export const POST: RequestHandler = async ({ request, cookies }) => {
 	const body = await request.json();
-	const { type, query, projectId: reqProjectId, maxResults, dateFrom, dateTo, skipRelevanceFilter } = body;
+	const { type, projectId: reqProjectId, maxResults, dateFrom, dateTo, skipRelevanceFilter } = body;
+	const query = typeof body.query === 'string' ? body.query.trim() : '';
 
-	if (!type || !query) {
-		return json({ error: 'type and query are required' }, { status: 400 });
+	if (!(SEARCH_TYPES as readonly string[]).includes(type)) {
+		return json({ error: `type must be one of: ${SEARCH_TYPES.join(', ')}` }, { status: 400 });
+	}
+	if (!query && !OPTIONAL_QUERY_TYPES.includes(type as SearchType)) {
+		return json({ error: 'query is required for this search type' }, { status: 400 });
+	}
+	if ((dateFrom && !DATE_RE.test(dateFrom)) || (dateTo && !DATE_RE.test(dateTo))) {
+		return json({ error: 'dateFrom and dateTo must be YYYY-MM-DD' }, { status: 400 });
 	}
 
-	const validTypes = ['journal', 'author', 'topic', 'citation_forward', 'citation_backward', 'related', 'snowball', 'database'];
-	if (!validTypes.includes(type)) {
-		return json({ error: `type must be one of: ${validTypes.join(', ')}` }, { status: 400 });
-	}
-
-	const projectId = reqProjectId || (await getDefaultProjectId());
+	const projectId = await resolveProjectId(reqProjectId, cookies);
 	if (!projectId) {
 		return json({ error: 'No project found. Create a project first.' }, { status: 400 });
 	}
+	const [project] = await db.select({ id: projects.id }).from(projects).where(eq(projects.id, projectId)).limit(1);
+	if (!project) {
+		return json({ error: 'Project not found' }, { status: 404 });
+	}
+
+	const cappedMax =
+		type === 'database' && maxResults ? Math.min(Math.max(Math.round(Number(maxResults)) || 200, 50), 10000) : null;
 
 	// Create job record
 	const jobId = crypto.randomUUID();
@@ -43,9 +53,9 @@ export const POST: RequestHandler = async ({ request }) => {
 		id: jobId,
 		projectId,
 		type,
-		query: query.trim(),
+		query,
 		status: 'pending',
-		maxResults: type === 'database' && maxResults ? Number(maxResults) : null,
+		maxResults: cappedMax,
 		dateFrom: dateFrom || null,
 		dateTo: dateTo || null,
 		skipRelevanceFilter: !!skipRelevanceFilter

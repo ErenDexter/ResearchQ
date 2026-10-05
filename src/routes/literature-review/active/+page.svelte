@@ -1,10 +1,12 @@
 <script lang="ts">
+	import { getProjectId } from '$lib/current-project';
 	import { page } from '$app/stores';
 	import { onMount } from 'svelte';
 	import Card from '$lib/components/ui/Card.svelte';
 	import Badge from '$lib/components/ui/Badge.svelte';
 	import Button from '$lib/components/ui/Button.svelte';
 	import Textarea from '$lib/components/ui/Textarea.svelte';
+	import { formatCell, jsonOutputToBlocks, outputBodyToMarkdown, type RenderBlock } from '$lib/review-output';
 	import {
 		ArrowLeft, CheckCircle2, Circle, Loader2, Play, SkipForward,
 		Download, RefreshCw, ChevronDown, ChevronRight, FileText, BookMarked, Eye, EyeOff
@@ -21,10 +23,6 @@
 	let expandedOutputs = $state<Set<string>>(new Set());
 	let generating = $state<string | null>(null);
 
-	function getProjectId(): string {
-		if (typeof window === 'undefined') return '';
-		return (window as any).__currentProjectId || localStorage.getItem('currentProjectId') || '';
-	}
 
 	async function loadReview() {
 		if (!reviewId) return;
@@ -81,20 +79,37 @@
 		generating = outputType;
 		const projectId = getProjectId();
 		try {
-			await fetch(`/api/projects/${projectId}/reviews/${reviewId}/outputs/generate`, {
+			const res = await fetch(`/api/projects/${projectId}/reviews/${reviewId}/outputs/generate`, {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({ outputType, phaseId })
 			});
+			if (!res.ok) {
+				const data = await res.json().catch(() => ({}));
+				alert(data.error || 'Failed to generate output');
+			}
 			await loadReview();
 		} catch (e) {
 			alert('Failed to generate output');
+		} finally {
+			generating = null;
 		}
-		generating = null;
 	}
 
-	function getOutputForType(outputType: string) {
-		return outputs.find((o) => o.outputType === outputType);
+	/** Latest output of this type for the phase, else the latest from any phase (outputs arrive newest first). */
+	function getOutputForType(outputType: string, phaseId: string) {
+		return (
+			outputs.find((o) => o.outputType === outputType && o.phaseId === phaseId) ??
+			outputs.find((o) => o.outputType === outputType)
+		);
+	}
+
+	function outputBlocks(contentJson: string): RenderBlock[] {
+		try {
+			return jsonOutputToBlocks(JSON.parse(contentJson));
+		} catch {
+			return [{ kind: 'code', text: contentJson }];
+		}
 	}
 
 	function toggleOutputExpand(key: string) {
@@ -105,31 +120,8 @@
 
 	// ─── Per-output downloads ──────────────────────────────────────
 
-	function jsonTableToMarkdown(data: { columns: string[]; rows: any[] }): string {
-		let md = '| ' + data.columns.join(' | ') + ' |\n';
-		md += '| ' + data.columns.map(() => '---').join(' | ') + ' |\n';
-		for (const row of data.rows) {
-			const vals = data.columns.map((col) => {
-				const key = Object.keys(row).find((k) => k.toLowerCase() === col.toLowerCase().replace(/[^a-z]/g, ''));
-				return String(row[key || col] ?? Object.values(row)[data.columns.indexOf(col)] ?? '—').replace(/\|/g, '\\|');
-			});
-			md += '| ' + vals.join(' | ') + ' |\n';
-		}
-		return md;
-	}
-
 	function downloadMd(output: any) {
-		let content = output.contentMarkdown || '';
-		if (!content && output.contentJson) {
-			try {
-				const data = JSON.parse(output.contentJson);
-				if (data.columns && data.rows) {
-					content = `# ${output.title}\n\n` + jsonTableToMarkdown(data);
-				} else {
-					content = `# ${output.title}\n\n\`\`\`json\n${JSON.stringify(data, null, 2)}\n\`\`\``;
-				}
-			} catch { content = output.contentJson; }
-		}
+		const content = output.contentMarkdown || `# ${output.title}\n\n${outputBodyToMarkdown(output, 2)}`;
 		const blob = new Blob([content], { type: 'text/markdown' });
 		const url = URL.createObjectURL(blob);
 		const a = document.createElement('a');
@@ -285,8 +277,9 @@
 
 							<!-- Notes -->
 							<div class="mb-4">
-								<label class="text-xs font-medium text-zinc-500 mb-1 block">Notes</label>
+								<label for="notes-{phase.id}" class="text-xs font-medium text-zinc-500 mb-1 block">Notes</label>
 								<Textarea
+									id="notes-{phase.id}"
 									value={phase.progress.notes || ''}
 									placeholder="Add notes for this phase..."
 									rows={2}
@@ -299,15 +292,15 @@
 								<h4 class="text-xs font-semibold text-zinc-500 uppercase mb-2">Expected Outputs</h4>
 								<div class="space-y-2">
 									{#each expectedOutputs as outputType}
-										{@const existing = getOutputForType(outputType)}
-										{@const isOutputExpanded = expandedOutputs.has(outputType)}
+										{@const existing = getOutputForType(outputType, phase.id)}
+										{@const isOutputExpanded = expandedOutputs.has(`${phase.id}:${outputType}`)}
 
 										<!-- Output row: title + badges + action buttons -->
 										<div class="rounded-lg border border-zinc-200 bg-white p-3">
 											<div class="flex items-center justify-between">
 												<button
 													class="flex items-center gap-2 text-left"
-													onclick={() => existing && toggleOutputExpand(outputType)}
+													onclick={() => existing && toggleOutputExpand(`${phase.id}:${outputType}`)}
 												>
 													<FileText class="h-4 w-4 text-zinc-400" />
 													<span class="text-sm font-medium text-zinc-700">
@@ -355,69 +348,57 @@
 															{existing.contentMarkdown}
 														</div>
 													{:else if existing.contentJson}
-														{@const data = (() => { try { return JSON.parse(existing.contentJson); } catch { return null; } })()}
-														{#if data?.columns && data?.rows}
-															<!-- Structured table data -->
-															<div class="overflow-x-auto">
-																<table class="w-full text-xs">
-																	<thead>
-																		<tr class="border-b">
-																			{#each data.columns as col}
-																				<th class="px-2 py-1 text-left font-medium text-zinc-500">{col}</th>
-																			{/each}
-																		</tr>
-																	</thead>
-																	<tbody>
-																		{#each data.rows.slice(0, 30) as row}
-																			<tr class="border-b border-zinc-50">
-																				{#each data.columns as col}
-																					<td class="px-2 py-1 text-zinc-600 max-w-xs truncate">
-																						{row[col] || row[col.toLowerCase()] || row[col.toLowerCase().replace(/[^a-z]/g, '')] || Object.values(row)[data.columns.indexOf(col)] || '—'}
-																					</td>
-																				{/each}
-																			</tr>
-																		{/each}
-																	</tbody>
-																</table>
-																{#if data.rows.length > 30}
-																	<p class="mt-2 text-xs text-zinc-400">Showing 30 of {data.rows.length} rows</p>
+														{#each outputBlocks(existing.contentJson) as block}
+															{#if block.kind === 'note'}
+																<p class="mb-2 rounded bg-amber-50 px-2 py-1 text-xs text-amber-800">{block.text}</p>
+															{:else if block.kind === 'code'}
+																<pre class="text-xs overflow-x-auto bg-zinc-50 p-2 rounded">{block.text}</pre>
+															{:else}
+																{#if block.title}
+																	<h5 class="text-xs font-semibold text-zinc-500 uppercase mt-3 mb-1">{block.title}</h5>
 																{/if}
-															</div>
-														{:else if typeof data === 'object' && !Array.isArray(data)}
-															<!-- Named arrays (e.g. bibliometric: { byYear: [...], byVenue: [...] }) -->
-															{#each Object.entries(data) as [sectionName, sectionData]}
-																<h5 class="text-xs font-semibold text-zinc-500 uppercase mt-3 mb-1">
-																	{sectionName.replace(/([A-Z])/g, ' $1').replace(/^./, (s) => s.toUpperCase())}
-																</h5>
-																{#if Array.isArray(sectionData) && sectionData.length > 0}
-																	{@const cols = Object.keys(sectionData[0])}
-																	<div class="overflow-x-auto">
+																<div class="overflow-x-auto">
+																	{#if block.kind === 'table'}
 																		<table class="w-full text-xs mb-2">
 																			<thead>
 																				<tr class="border-b">
-																					{#each cols as col}
-																						<th class="px-2 py-1 text-left font-medium text-zinc-500">
-																							{col.replace(/([A-Z])/g, ' $1').replace(/^./, (s) => s.toUpperCase())}
-																						</th>
+																					{#each block.columns as col}
+																						<th class="px-2 py-1 text-left font-medium text-zinc-500">{col.label}</th>
 																					{/each}
 																				</tr>
 																			</thead>
 																			<tbody>
-																				{#each sectionData as row}
+																				{#each block.rows.slice(0, 30) as row}
 																					<tr class="border-b border-zinc-50">
-																						{#each cols as col}
-																							<td class="px-2 py-1 text-zinc-600">{row[col] ?? '—'}</td>
+																						{#each block.columns as col}
+																							<td class="px-2 py-1 text-zinc-600 max-w-xs truncate" title={formatCell(row[col.key])}>
+																								{formatCell(row[col.key])}
+																							</td>
 																						{/each}
 																					</tr>
 																				{/each}
 																			</tbody>
 																		</table>
-																	</div>
-																{/if}
-															{/each}
-														{:else}
-															<pre class="text-xs overflow-x-auto bg-zinc-50 p-2 rounded">{JSON.stringify(data, null, 2)}</pre>
-														{/if}
+																		{#if block.rows.length > 30}
+																			<p class="mt-1 mb-2 text-xs text-zinc-400">
+																				Showing 30 of {block.rows.length} rows — download MD or DOCX for the full table.
+																			</p>
+																		{/if}
+																	{:else}
+																		<table class="text-xs mb-2">
+																			<tbody>
+																				{#each block.entries as [label, value]}
+																					<tr class="border-b border-zinc-50">
+																						<td class="px-2 py-1 font-medium text-zinc-500">{label}</td>
+																						<td class="px-2 py-1 text-zinc-700">{value}</td>
+																					</tr>
+																				{/each}
+																			</tbody>
+																		</table>
+																	{/if}
+																</div>
+															{/if}
+														{/each}
 													{/if}
 												</div>
 											{/if}

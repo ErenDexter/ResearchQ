@@ -113,6 +113,8 @@ Click the launch button above to create a new Diploi deployment.
 
 In Diploi, open your deployment page and go to **Options > SvelteKit > Environment**. Add any required environment variables that are missing.
 
+> **Set `AUTH_USERNAME` and `AUTH_PASSWORD`.** A Diploi deployment is reachable by anyone with its URL, and ResearchQ has no user accounts. With both variables set, the whole app asks for a login; without them, anyone can read your data, delete projects and spend your LLM quota.
+
 3. **Run the database migration**
 
 Click **Connect +** in the SvelteKit section, then run the copied SSH command in your local terminal.
@@ -123,7 +125,7 @@ In the `/app` directory, run:
 pnpm run db:push
 ```
 
-After that, accept the db queries to be applied interactively in the terminal by selecting "Yes, I want to execute all statements".
+After that, accept the db queries to be applied interactively in the terminal by selecting "Yes, I want to execute all statements". Run it again after each update — new releases can add columns or indexes.
 
 4. **Preview the deployment**
 
@@ -137,7 +139,7 @@ For more information, please visit [diploi.com](https://diploi.com/)
 
 ### Requirements
 
-- **Node.js** ≥ 20
+- **Node.js** ≥ 20.19 (required by Vite 7)
 - **pnpm** ≥ 9 (or use `npm` / `yarn` with equivalent commands)
 - A **build toolchain** for `better-sqlite3` native bindings:
   - macOS: Xcode command-line tools (`xcode-select --install`)
@@ -153,6 +155,10 @@ Detailed install guide and troubleshooting: [docs/installation.md](docs/installa
 
 SQLite is the default and works out of the box for local use. If you want to deploy ResearchQ as a shared service, set `DB_DIALECT=postgres` and point `DATABASE_URL` at your Postgres instance. Then run `pnpm db:push:pg` to apply the schema. See [docs/configuration.md](docs/configuration.md) for details.
 
+### Upgrading
+
+After pulling a new version, run `pnpm install` and then `pnpm db:push` (or `pnpm db:push:pg`) again — schema changes are applied in place and existing data is kept.
+
 ---
 
 ## Configuration
@@ -164,10 +170,11 @@ All configuration lives in `.env`. The authoritative reference is [.env.example]
 | `DB_DIALECT` | `sqlite` (local) or `postgres` (cloud) | `sqlite` | No |
 | `DATABASE_URL` | SQLite file path **or** Postgres connection string | `./data/researchq.db` | No |
 | `LLM_PROVIDER` | `gateway` (Vercel AI Gateway) or `google` (Google AI Studio direct) | `gateway` | No |
-| `LLM` | Gemini model ID (e.g. `google/gemini-2.0-flash` or `gemini-2.5-flash`) | `google/gemini-2.0-flash` | No |
+| `LLM` | Gemini model ID (e.g. `google/gemini-3.1-flash-lite` or `gemini-3.8-flash`) | `google/gemini-3.1-flash-lite` | No |
 | `AI_GATEWAY_KEY` | Vercel AI Gateway key | — | Yes (gateway mode) |
 | `GOOGLE_GENERATIVE_AI_API_KEY` | Google AI Studio key | — | Yes (google mode) |
 | `OPENALEX_EMAIL` | Your email — gets you into OpenAlex's faster "polite" pool | — | Recommended |
+| `AUTH_USERNAME` / `AUTH_PASSWORD` | Require a login (HTTP Basic auth) for the whole app | — | Yes, if internet-facing |
 
 ---
 
@@ -211,8 +218,12 @@ src/
 │   │   ├── research-intelligence.ts # Gap analysis, networks, trends
 │   │   ├── project-context.ts   # Per-project prompt context
 │   │   ├── prompts.ts           # All AI prompts (single source)
-│   │   ├── job-queue.ts         # Resumable search pipeline
-│   │   └── export.ts            # BibTeX / CSV / JSON / DOCX
+│   │   ├── jobs.ts              # Resumable search pipeline
+│   │   ├── job-queue.ts         # Sequential job queue + restart recovery
+│   │   ├── export.ts            # BibTeX / CSV / JSON
+│   │   └── docx-export.ts       # DOCX rendering
+│   ├── review-output.ts         # Shared rendering of review outputs (UI + exports)
+│   ├── screening.ts             # Screening decision labels + provenance
 │   └── components/ui/           # Svelte 5 UI primitives
 └── routes/                      # SvelteKit pages + API routes
 ```

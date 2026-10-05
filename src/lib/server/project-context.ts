@@ -10,8 +10,10 @@ import {
 	projectKeywords,
 	keywords
 } from './db/schema';
-import { eq, and } from 'drizzle-orm';
+import { eq, and, desc } from 'drizzle-orm';
+import type { Cookies } from '@sveltejs/kit';
 import type { PromptContext } from './prompts';
+import { PROJECT_COOKIE } from '$lib/project-cookie';
 
 export async function loadPromptContext(projectId: string): Promise<PromptContext> {
 	const [project] = await db
@@ -63,14 +65,33 @@ export async function loadPromptContext(projectId: string): Promise<PromptContex
 }
 
 /**
- * Get the first active project's ID (used when no project is specified).
+ * The project used when none is specified: the newest active project, or the
+ * newest project of any status. Matches the sidebar's default selection.
  */
 export async function getDefaultProjectId(): Promise<string | null> {
-	const [project] = await db
-		.select({ id: projects.id })
+	const list = await db
+		.select({ id: projects.id, status: projects.status })
 		.from(projects)
-		.where(eq(projects.status, 'active'))
-		.limit(1);
+		.orderBy(desc(projects.createdAt));
 
-	return project?.id || null;
+	return (list.find((p) => p.status === 'active') ?? list[0])?.id ?? null;
+}
+
+async function projectExists(id: string): Promise<boolean> {
+	const [row] = await db.select({ id: projects.id }).from(projects).where(eq(projects.id, id)).limit(1);
+	return !!row;
+}
+
+/**
+ * Resolves the project a request is about: an explicit id (query param or
+ * body), then the sidebar's project cookie, then the default project.
+ */
+export async function resolveProjectId(
+	explicit: string | null | undefined,
+	cookies?: Cookies
+): Promise<string | null> {
+	if (explicit) return explicit;
+	const fromCookie = cookies?.get(PROJECT_COOKIE);
+	if (fromCookie && (await projectExists(fromCookie))) return fromCookie;
+	return getDefaultProjectId();
 }

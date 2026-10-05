@@ -69,7 +69,7 @@
 					{#each data.recentJobs as job}
 						<div class="flex items-center justify-between rounded-lg border border-zinc-100 px-4 py-3">
 							<div>
-								<p class="text-sm font-medium text-zinc-900">{job.query}</p>
+								<p class="text-sm font-medium text-zinc-900">{job.query || "(project keywords)"}</p>
 								<p class="text-xs text-zinc-500">
 									<Badge variant={job.type === 'journal' ? 'secondary' : 'outline'} class="mr-1">{job.type}</Badge>
 									{job.totalFound} found · {job.relevantCount} relevant

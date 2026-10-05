@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { getProjectId } from '$lib/current-project';
 	import Card from '$lib/components/ui/Card.svelte';
 	import Badge from '$lib/components/ui/Badge.svelte';
 	import Button from '$lib/components/ui/Button.svelte';
@@ -13,6 +14,7 @@
 	async function loadAuthors() {
 		loading = true;
 		const params = new URLSearchParams({
+			projectId: getProjectId(),
 			page: String(currentPage),
 			limit: '50'
 		});

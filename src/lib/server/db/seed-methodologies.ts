@@ -4,7 +4,7 @@
 
 import { db } from '.';
 import { reviewMethodologies, methodologyPhases } from './schema';
-import { sql } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 
 interface MethodologySeed {
 	name: string;
@@ -656,15 +656,19 @@ const METHODOLOGIES: MethodologySeed[] = [
 ];
 
 export async function seedMethodologies(): Promise<{ inserted: number; total: number }> {
-	// Check if already seeded
-	const existing = await db.select({ id: reviewMethodologies.id }).from(reviewMethodologies).limit(1);
-	if (existing.length > 0) {
-		return { inserted: 0, total: METHODOLOGIES.length };
-	}
+	// Insert any built-in methodology that is missing (by name). This also completes
+	// a seed that was interrupted part-way and picks up built-ins added in new releases.
+	const existing = await db
+		.select({ name: reviewMethodologies.name })
+		.from(reviewMethodologies)
+		.where(eq(reviewMethodologies.isBuiltIn, true));
+	const existingNames = new Set(existing.map((m) => m.name));
 
 	let inserted = 0;
 
 	for (const method of METHODOLOGIES) {
+		if (existingNames.has(method.name)) continue;
+
 		const [m] = await db
 			.insert(reviewMethodologies)
 			.values({
@@ -690,6 +694,21 @@ export async function seedMethodologies(): Promise<{ inserted: number; total: nu
 		inserted++;
 	}
 
-	console.log(`[seed] Inserted ${inserted} built-in review methodologies`);
+	if (inserted > 0) console.log(`[seed] Inserted ${inserted} built-in review methodologies`);
 	return { inserted, total: METHODOLOGIES.length };
+}
+
+let seeding: Promise<unknown> | null = null;
+
+/**
+ * Seeds built-in methodologies once per process. Concurrent callers share the
+ * same in-flight run (so two simultaneous first requests can't double-seed);
+ * a failed run is retried on the next call (e.g. after `pnpm db:push`).
+ */
+export function ensureMethodologiesSeeded(): Promise<unknown> {
+	seeding ??= seedMethodologies().catch((err) => {
+		seeding = null;
+		throw err;
+	});
+	return seeding;
 }
